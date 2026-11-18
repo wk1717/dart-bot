@@ -88,14 +88,13 @@ def classify(report_nm):
     return None
 
 
-def fetch_disclosures(api_key, bgn, end):
+def fetch_disclosures(api_key, bgn, end, corp_cls=None):
     items, page = [], 1
     while True:
-        q = urllib.parse.urlencode({
-            "crtfc_key": api_key, "bgn_de": bgn, "end_de": end,
-            "page_no": page, "page_count": 100,
-        })
-        res = http_json(f"{DART_LIST_URL}?{q}")
+        params = {"crtfc_key": api_key, "bgn_de": bgn, "end_de": end, "page_no": page, "page_count": 100}
+        if corp_cls:
+            params["corp_cls"] = corp_cls
+        res = http_json(f"{DART_LIST_URL}?{urllib.parse.urlencode(params)}")
         if res["status"] == "013":  # 데이터 없음 (휴일)
             return items
         if res["status"] != "000":
@@ -104,6 +103,23 @@ def fetch_disclosures(api_key, bgn, end):
         if page >= res["total_page"]:
             return items
         page += 1
+
+
+def to_row(item, saved_at):
+    return {
+        "rcept_no": item["rcept_no"], "rcept_dt": item["rcept_dt"], "corp_code": item["corp_code"],
+        "corp_name": item["corp_name"], "stock_code": item["stock_code"], "corp_cls": item["corp_cls"],
+        "report_nm": item["report_nm"], "category": classify(item["report_nm"]), "saved_at": saved_at,
+    }
+
+
+def save_rows(rows):
+    # 이미 있는 건 무시, 새로 들어간 것만 셈. 중간에 끊겨도 다음 실행 때 채워짐
+    saved = 0
+    for n in range(0, len(rows), 500):
+        saved += len(sb("POST", "disclosures?select=rcept_no", rows[n:n + 500],
+                        "resolution=ignore-duplicates,return=representation"))
+    return saved
 
 
 def send_telegram(text):
@@ -146,16 +162,9 @@ def collect(day=None):
 
     started = datetime.now().isoformat(timespec="seconds")
     try:
-        rows = [{
-            "rcept_no": i["rcept_no"], "rcept_dt": i["rcept_dt"], "corp_code": i["corp_code"],
-            "corp_name": i["corp_name"], "stock_code": i["stock_code"], "corp_cls": i["corp_cls"],
-            "report_nm": i["report_nm"], "category": classify(i["report_nm"]), "saved_at": started,
-        } for i in fetch_disclosures(os.environ["DART_API_KEY"], bgn, end) if i["corp_cls"] in LISTED]
-        saved = 0
-        # 이미 있는 건 무시, 새로 들어간 것만 셈. 중간에 끊겨도 다음 실행 때 채워짐
-        for n in range(0, len(rows), 500):
-            saved += len(sb("POST", "disclosures?select=rcept_no", rows[n:n + 500],
-                            "resolution=ignore-duplicates,return=representation"))
+        rows = [to_row(i, started) for i in fetch_disclosures(os.environ["DART_API_KEY"], bgn, end)
+                if i["corp_cls"] in LISTED]
+        saved = save_rows(rows)
         sb("POST", "runs", {"started_at": started, "ok": 1, "saved": saved, "error": None})
         print(f"{started} {bgn}~{end}: 새 공시 {saved}건 저장")
         return saved
