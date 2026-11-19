@@ -6,13 +6,14 @@ import streamlit as st
 
 import analyze
 import bot
+import trader
 
 st.set_page_config(page_title="dart-bot", layout="wide")
 bot.check_env()
 
 
-def load_stats():  # 작은 파일이라 캐시 안 함 → analyze.py 다시 돌리면 바로 반영
-    p = bot.ROOT / "data" / "event_stats.csv"
+def load_stats(name="event_stats.csv"):  # 작은 파일이라 캐시 안 함 → 분석 다시 돌리면 바로 반영
+    p = bot.ROOT / "data" / name
     return pd.read_csv(p) if p.exists() else None
 
 
@@ -40,7 +41,7 @@ def search(name):
 st.title("dart-bot")
 st.caption("DART 공시 유형별로 공시 뒤 주가가 어떻게 움직였는지")
 
-tab1, tab2, tab3 = st.tabs(["유형별 결과", "공시 추이", "회사 검색"])
+tab1, tab4, tab2, tab3 = st.tabs(["유형별 결과", "자사주 매입 규모", "공시 추이", "회사 검색"])
 
 with tab1:
     stats = load_stats()
@@ -77,6 +78,39 @@ with tab1:
         })
         st.caption("기준가: 공시 다음 거래일 시가 · 초과수익률 = 종목 수익률 - 지수 수익률 · "
                    "정정공시, 거래정지, 거래량 0인 날 제외")
+
+with tab4:
+    bb = load_stats("buyback_stats.csv")
+    if bb is None:
+        st.info("data/buyback_stats.csv가 없음 → python3 buyback.py 먼저 실행")
+    else:
+        st.caption("자사주취득 공시를 매입 비율(취득예정 주식 수 / 상장주식수) 순으로 3등분 · 3거래일 초과수익률")
+        view = pd.DataFrame({
+            "그룹": bb["group"],
+            "매입 비율": [f"{a:.2%} ~ {b:.2%}" for a, b in zip(bb["ratio_min"], bb["ratio_max"])],
+            "표본": bb["n"],
+            "평균": bb["mean"] * 100,
+            "중앙값": bb["median"] * 100,
+            "하락 비율": bb["down"] * 100,
+            "p값": bb["p"],
+        })
+        view["판단"] = ["유의" if p < 0.05 else "우연일 수 있음" for p in view["p값"]]
+        long = view.melt(id_vars="그룹", value_vars=["평균", "중앙값"], var_name="지표", value_name="초과수익률(%)")
+        st.altair_chart(alt.Chart(long).mark_bar().encode(
+            x=alt.X("그룹:N", sort=["하위", "중간", "상위"], title=None, axis=alt.Axis(labelAngle=0)),
+            xOffset="지표:N",
+            y=alt.Y("초과수익률(%):Q"),
+            color=alt.Color("지표:N", legend=alt.Legend(orient="top", title=None)),
+            tooltip=["그룹", "지표", alt.Tooltip("초과수익률(%):Q", format="+.2f")],
+        ), width="stretch")
+        st.dataframe(view, hide_index=True, column_config={
+            "평균": st.column_config.NumberColumn(format="%+.2f%%"),
+            "중앙값": st.column_config.NumberColumn(format="%+.2f%%"),
+            "하락 비율": st.column_config.NumberColumn(format="%.0f%%"),
+            "p값": st.column_config.NumberColumn(format="%.3f"),
+        })
+        st.caption(f"모의투자 봇은 매입 비율 {trader.MIN_RATIO:.0%} 미만은 안 사고, 큰 것부터 삼 · "
+                   "상장주식수는 현재 기준이라 오래된 공시는 그사이 증자·감자만큼 어긋남")
 
 with tab2:
     days = st.select_slider("기간", [30, 90, 180, 365], value=90, format_func=lambda d: f"최근 {d}일")
