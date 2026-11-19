@@ -1,13 +1,17 @@
 """오프라인 테스트. DART 응답은 가짜 픽스처, Supabase는 FakeSB로 대체"""
 import json
 import os
+import tempfile
 import unittest
 import urllib.parse
 from datetime import date
 from pathlib import Path
 from unittest import mock
 
+import analyze
+import backfill
 import bot
+import prices
 
 TODAY = date.today().strftime("%Y%m%d")
 _raw = json.loads((Path(__file__).parent / "fixtures" / "list_page1.json").read_text())
@@ -147,6 +151,77 @@ class CollectTest(unittest.TestCase):
             text = bot.summary(TODAY)
         self.assertIn("실행 1회 중 성공 0회", text)
         self.assertIn("마지막 에러: OSError: x", text)
+
+
+@mock.patch.dict(os.environ, ENV)
+class BackfillTest(unittest.TestCase):
+    def setUp(self):
+        self.sb = FakeSB()
+        patcher = mock.patch("bot.sb", self.sb)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.done = Path(tempfile.mkdtemp()) / "done.txt"
+
+    @staticmethod
+    def by_cls(url):
+        cls = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["corp_cls"][0]
+        return {**FIXTURE, "list": [i for i in FIXTURE["list"] if i["corp_cls"] == cls]}
+
+    def test_saves_only_classified_and_resumes(self):
+        with mock.patch("bot.http_json", side_effect=self.by_cls) as h:
+            self.assertEqual(backfill.backfill("20261112", "20261113", self.done), 3)
+            self.assertEqual(h.call_count, 4)  # 2일 x 유가/코스닥
+            backfill.backfill("20261112", "20261113", self.done)
+            self.assertEqual(h.call_count, 4)  # 끝난 날은 다시 안 부름
+        self.assertTrue(all(r["category"] for r in self.sb.disclosures.values()))
+        self.assertEqual(self.done.read_text().split(), ["20261112", "20261113"])
+
+    def test_stops_on_daily_limit_without_marking_day(self):
+        limit = {"status": "020", "message": "요청 제한을 초과하였습니다."}
+        with mock.patch("bot.http_json", side_effect=[self.by_cls("?corp_cls=Y"), self.by_cls("?corp_cls=K"), limit]):
+            backfill.backfill("20261112", "20261113", self.done)
+        self.assertEqual(self.done.read_text().split(), ["20261112"])
+
+
+class PriceTest(unittest.TestCase):
+    def test_parse_chart(self):
+        xml = """<chartdata symbol="005930" name="삼성전자">
+	<item data="20261112|208500|214000|206000|206500|19721557" />
+	<item data="20261113|214000|216000|205000|209000|12829515" />
+</chartdata>"""
+        self.assertEqual(prices.parse_chart(xml), [
+            ["20261112", "208500", "214000", "206000", "206500", "19721557"],
+            ["20261113", "214000", "216000", "205000", "209000", "12829515"],
+        ])
+        self.assertEqual(prices.parse_chart("<chartdata></chartdata>"), [])
+
+
+class AnalyzeTest(unittest.TestCase):
+    STOCK = [("20261102", 100, 100), ("20261103", 100, 110), ("20261104", 110, 99),
+             ("20261105", 99, 120), ("20261106", 120, 121), ("20261109", 121, 130)]
+    INDEX = {d: (1000, 1010) for d, _, _ in STOCK}
+
+    def test_abnormal_return_from_next_day_open(self):
+        e = {"rcept_dt": "20261102", "category": "유상증자"}
+        ret, reason = analyze.event_returns(e, self.STOCK, self.INDEX)
+        self.assertIsNone(reason)
+        # 기준가 = 11/03 시가 100, 지수는 1000 → 그날 종가 1010
+        self.assertAlmostEqual(ret[1], 0.10 - 0.01)
+        self.assertAlmostEqual(ret[3], 0.20 - 0.01)
+        self.assertAlmostEqual(ret[5], 0.30 - 0.01)
+
+    def test_long_gap_is_trading_halt(self):
+        stock = [("20261102", 100, 100)] + [(f"202611{d}", 100, 100) for d in range(20, 26)]
+        ret, reason = analyze.event_returns({"rcept_dt": "20261102", "category": "감자"}, stock,
+                                            {d: (1, 1) for d, _, _ in stock})
+        self.assertEqual(reason, "거래정지")
+
+    def test_zero_volume_days_are_dropped(self):
+        csv_text = "date,open,high,low,close,volume\n20261102,100,1,1,100,5\n20261103,100,1,1,100,0\n"
+        d = Path(tempfile.mkdtemp())
+        (d / "X.csv").write_text(csv_text)
+        with mock.patch("prices.PRICE_DIR", d):
+            self.assertEqual(analyze.load_prices("X"), [("20261102", 100.0, 100.0)])
 
 
 if __name__ == "__main__":
