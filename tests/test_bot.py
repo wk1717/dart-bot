@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 import urllib.parse
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -132,6 +132,10 @@ class CollectTest(unittest.TestCase):
         with mock.patch("bot.http_json", return_value={"status": "013", "message": "조회된 데이타가 없습니다."}):
             self.assertEqual(bot.collect(TODAY), 0)
 
+    def test_summary_day_survives_cron_delay(self):
+        self.assertEqual(bot.summary_day(datetime(2026, 11, 18, 19, 5)), "20261118")
+        self.assertEqual(bot.summary_day(datetime(2026, 11, 19, 3, 47)), "20261118")  # 밀린 실행
+
     def test_summary_ok(self):
         with mock.patch("bot.http_json", return_value=FIXTURE):
             bot.collect(TODAY)
@@ -194,6 +198,15 @@ class PriceTest(unittest.TestCase):
             ["20261113", "214000", "216000", "205000", "209000", "12829515"],
         ])
         self.assertEqual(prices.parse_chart("<chartdata></chartdata>"), [])
+
+    def test_empty_chart_keeps_old_file(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "X.csv").write_text("old")
+        with mock.patch("prices.PRICE_DIR", d), mock.patch("prices.INDEXES", ["X"]), \
+             mock.patch("prices.stock_codes", return_value=[]), mock.patch("prices.fresh", return_value=False), \
+             mock.patch("prices.fetch_chart", return_value=[]), mock.patch("bot.check_env"):
+            prices.main()
+        self.assertEqual((d / "X.csv").read_text(), "old")
 
 
 class AnalyzeTest(unittest.TestCase):

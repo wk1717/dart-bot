@@ -196,9 +196,14 @@ def build_summary(day):
     return "\n".join(lines)
 
 
+def summary_day(now):
+    # GitHub 크론이 몇 시간씩 밀려 자정을 넘김 → 12시간 빼서 원래 날짜로
+    return (now - timedelta(hours=12)).strftime("%Y%m%d")
+
+
 def summary(day=None):
     check_env()
-    text = build_summary(day or date.today().strftime("%Y%m%d"))
+    text = build_summary(day or summary_day(datetime.now()))
     send_telegram(text)
     print(text)
     return text

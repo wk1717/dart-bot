@@ -11,9 +11,9 @@ st.set_page_config(page_title="dart-bot", layout="wide")
 bot.check_env()
 
 
-@st.cache_data
-def load_stats():
-    return pd.read_csv(bot.ROOT / "data" / "event_stats.csv")
+def load_stats():  # 작은 파일이라 캐시 안 함 → analyze.py 다시 돌리면 바로 반영
+    p = bot.ROOT / "data" / "event_stats.csv"
+    return pd.read_csv(p) if p.exists() else None
 
 
 @st.cache_data(ttl=600)
@@ -44,36 +44,39 @@ tab1, tab2, tab3 = st.tabs(["유형별 결과", "공시 추이", "회사 검색"
 
 with tab1:
     stats = load_stats()
-    h = st.radio("기간", [1, 3, 5], index=2, horizontal=True, format_func=lambda d: f"{d}거래일")
-    view = pd.DataFrame({
-        "유형": stats["category"],
-        "표본": stats[f"n_{h}d"],
-        "평균": stats[f"mean_{h}d"] * 100,
-        "중앙값": stats[f"median_{h}d"] * 100,
-        "하락 비율": stats[f"down_{h}d"] * 100,
-        "p값": stats[f"p_{h}d"],
-    })
-    view["판단"] = ["표본 부족" if n < analyze.MIN_SAMPLE else ("유의" if p < 0.05 else "우연일 수 있음")
-                  for n, p in zip(view["표본"], view["p값"])]
-    view = view.sort_values("평균")
+    if stats is None:
+        st.info("data/event_stats.csv가 없음 → python3 analyze.py 먼저 실행")
+    else:
+        h = st.radio("기간", [1, 3, 5], index=2, horizontal=True, format_func=lambda d: f"{d}거래일")
+        view = pd.DataFrame({
+            "유형": stats["category"],
+            "표본": stats[f"n_{h}d"],
+            "평균": stats[f"mean_{h}d"] * 100,
+            "중앙값": stats[f"median_{h}d"] * 100,
+            "하락 비율": stats[f"down_{h}d"] * 100,
+            "p값": stats[f"p_{h}d"],
+        })
+        view["판단"] = ["표본 부족" if n < analyze.MIN_SAMPLE else ("유의" if p < 0.05 else "우연일 수 있음")
+                      for n, p in zip(view["표본"], view["p값"])]
+        view = view.sort_values("평균")
 
-    # 가로 막대: 유형 이름이 세로로 눕지 않게, 평균 순서대로
-    long = view.melt(id_vars="유형", value_vars=["평균", "중앙값"], var_name="지표", value_name="초과수익률(%)")
-    st.altair_chart(alt.Chart(long).mark_bar().encode(
-        y=alt.Y("유형:N", sort=list(view["유형"]), title=None),
-        yOffset="지표:N",
-        x=alt.X("초과수익률(%):Q"),
-        color=alt.Color("지표:N", legend=alt.Legend(orient="top", title=None)),
-        tooltip=["유형", "지표", alt.Tooltip("초과수익률(%):Q", format="+.2f")],
-    ), width="stretch")
-    st.dataframe(view, hide_index=True, column_config={
-        "평균": st.column_config.NumberColumn(format="%+.2f%%"),
-        "중앙값": st.column_config.NumberColumn(format="%+.2f%%"),
-        "하락 비율": st.column_config.NumberColumn(format="%.0f%%"),
-        "p값": st.column_config.NumberColumn(format="%.3f"),
-    })
-    st.caption("기준가: 공시 다음 거래일 시가 · 초과수익률 = 종목 수익률 - 지수 수익률 · "
-               "정정공시, 거래정지, 거래량 0인 날 제외")
+        # 가로 막대: 유형 이름이 세로로 눕지 않게, 평균 순서대로
+        long = view.melt(id_vars="유형", value_vars=["평균", "중앙값"], var_name="지표", value_name="초과수익률(%)")
+        st.altair_chart(alt.Chart(long).mark_bar().encode(
+            y=alt.Y("유형:N", sort=list(view["유형"]), title=None),
+            yOffset="지표:N",
+            x=alt.X("초과수익률(%):Q"),
+            color=alt.Color("지표:N", legend=alt.Legend(orient="top", title=None)),
+            tooltip=["유형", "지표", alt.Tooltip("초과수익률(%):Q", format="+.2f")],
+        ), width="stretch")
+        st.dataframe(view, hide_index=True, column_config={
+            "평균": st.column_config.NumberColumn(format="%+.2f%%"),
+            "중앙값": st.column_config.NumberColumn(format="%+.2f%%"),
+            "하락 비율": st.column_config.NumberColumn(format="%.0f%%"),
+            "p값": st.column_config.NumberColumn(format="%.3f"),
+        })
+        st.caption("기준가: 공시 다음 거래일 시가 · 초과수익률 = 종목 수익률 - 지수 수익률 · "
+                   "정정공시, 거래정지, 거래량 0인 날 제외")
 
 with tab2:
     days = st.select_slider("기간", [30, 90, 180, 365], value=90, format_func=lambda d: f"최근 {d}일")
