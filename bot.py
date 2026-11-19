@@ -65,7 +65,8 @@ def http_json(url, data=None):
 def sb(method, path, body=None, prefer=None, count=False):
     # URL에 /rest/v1/까지 붙여 넣어도 되게
     base = os.environ["SUPABASE_URL"].rstrip("/").removesuffix("/rest/v1")
-    url = f"{base}/rest/v1/{path}"
+    # category=eq.자사주취득 같은 한글은 인코딩해야 함. 이미 %로 인코딩된 건 그대로
+    url = f"{base}/rest/v1/{urllib.parse.quote(path, safe='/?&=.,()*:%!')}"
     headers = {"apikey": os.environ["SUPABASE_KEY"], "Content-Type": "application/json"}
     if prefer:
         headers["Prefer"] = prefer
