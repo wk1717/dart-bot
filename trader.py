@@ -4,7 +4,9 @@ python3 trader.py buy    08:40 실행. 전 거래일 자사주취득 공시 종�
 python3 trader.py sell   15:20 실행. 산 날 포함 3거래일째인 종목을 시장가 매도 → 종가 체결
 python3 trader.py settle 15:40 실행. 매도 체결가로 수익률 계산해서 알림 (15:20엔 아직 체결 전)
 
-규칙은 analyze.py 결과 기준 (자사주취득 3일 평균 +1.76%)
+규칙은 analyze.py, buyback.py 결과 기준
+- 자사주취득 3일 평균 +1.76%
+- 매입 비율(취득예정 주식 / 상장주식) 1% 미만은 효과 없음(-0.14%, p 0.726) → 안 삼. 큰 것부터 삼
 """
 import json
 import os
@@ -24,6 +26,7 @@ CATEGORY = "자사주취득"
 BUDGET = 1_000_000   # 종목당
 MAX_HOLD = 10
 HOLD_DAYS = 3        # 산 날 포함
+MIN_RATIO = 0.01     # 매입 비율 하한
 ENV_KEYS = ["KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ACCOUNT"]
 
 
@@ -76,10 +79,30 @@ def account():
     return {"CANO": cano, "ACNT_PRDT_CD": prdt}
 
 
-def price(code):
+def quote(code):
+    """(현재가, 상장주식수). 장 전에는 전일 종가"""
     res = kis("GET", "/uapi/domestic-stock/v1/quotations/inquire-price", "FHKST01010100",
               {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code})
-    return int(res["output"]["stck_prpr"])  # 장 전에는 전일 종가
+    return int(res["output"]["stck_prpr"]), int(res["output"]["lstn_stcn"])
+
+
+def dart_buyback(corp_code, bgn, end):
+    """DART 자기주식 취득 결정 상세 → {접수번호: 취득예정 보통주 수(문자열)}"""
+    q = urllib.parse.urlencode({"crtfc_key": os.environ["DART_API_KEY"], "corp_code": corp_code,
+                                "bgn_de": bgn, "end_de": end})
+    res = bot.http_json(f"https://opendart.fss.or.kr/api/tsstkAqDecsn.json?{q}")
+    if res["status"] == "013":
+        return {}
+    if res["status"] != "000":
+        raise RuntimeError(f"DART {res['status']} {res.get('message')}")
+    return {r["rcept_no"]: r["aqpln_stk_ostk"] for r in res["list"]}
+
+
+def buyback_qty(detail, rcept_no):
+    # 공시 목록과 상세의 접수번호가 다를 때가 있음 (같은 날 다시 낸 것) → 같은 날짜 것으로
+    key = rcept_no if rcept_no in detail else next((k for k in detail if k[:8] == rcept_no[:8]), None)
+    v = (detail.get(key) or "").replace(",", "")
+    return int(v) if v.isdigit() else None
 
 
 def holdings():
@@ -157,25 +180,39 @@ def buy(today=None):
     check_env()
     today = today or date.today().strftime("%Y%m%d")
     days = trading_days(today)
-    rows = bot.sb("GET", f"disclosures?select=rcept_no,rcept_dt,stock_code,corp_name,corp_cls,report_nm"
+    rows = bot.sb("GET", f"disclosures?select=rcept_no,rcept_dt,corp_code,stock_code,corp_name,corp_cls,report_nm"
                          f"&category=eq.{CATEGORY}&rcept_dt=gt.{days[-2]}&corp_cls=in.({','.join(bot.LISTED)})")
     trades = bot.sb("GET", "trades?select=rcept_no,stock_code,sell_date")
     open_ = [t for t in trades if not t["sell_date"]]
     signals = pick_signals(rows, days, {t["rcept_no"] for t in trades}, {t["stock_code"] for t in open_})
-    lines = []
-    for r in signals[:max(0, MAX_HOLD - len(open_))]:
+    lines, ranked = [], []
+    for r in signals:
         try:
-            qty = BUDGET // price(r["stock_code"])
-            if qty == 0:
-                lines.append(f"건너뜀 {r['corp_name']}: 1주가 {BUDGET:,}원 넘음")
-                continue
+            qty = buyback_qty(dart_buyback(r["corp_code"], r["rcept_dt"], r["rcept_dt"]), r["rcept_no"])
+            px, shares = quote(r["stock_code"])
+        except Exception as e:
+            lines.append(f"실패 {r['corp_name']}: {e}")
+            continue
+        if not qty:
+            lines.append(f"건너뜀 {r['corp_name']}: 매입 규모 모름")
+        elif qty / shares < MIN_RATIO:
+            lines.append(f"건너뜀 {r['corp_name']}: 매입 비율 {qty / shares:.2%} (1% 미만)")
+        else:
+            ranked.append((qty / shares, px, r))
+    ranked.sort(key=lambda x: -x[0])  # 크게 사는 것부터
+    for ratio, px, r in ranked[:max(0, MAX_HOLD - len(open_))]:
+        qty = BUDGET // px
+        if qty == 0:
+            lines.append(f"건너뜀 {r['corp_name']}: 1주가 {BUDGET:,}원 넘음")
+            continue
+        try:
             odno = order("buy", r["stock_code"], qty)
         except Exception as e:  # 주문 실패는 기록 안 함 → 휴장일이면 다음 거래일에 다시 시도
             lines.append(f"실패 {r['corp_name']}: {e}")
             continue
         bot.sb("POST", "trades", {"rcept_no": r["rcept_no"], "stock_code": r["stock_code"],
                                   "corp_name": r["corp_name"], "qty": qty, "buy_date": today, "buy_odno": odno})
-        lines.append(f"매수 {r['corp_name']}({r['stock_code']}) {qty}주")
+        lines.append(f"매수 {r['corp_name']}({r['stock_code']}) {qty}주, 매입 비율 {ratio:.2%}")
     report("매수", lines)
 
 
