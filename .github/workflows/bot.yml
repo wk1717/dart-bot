@@ -3,11 +3,12 @@ name: dart-bot
 on:
   # GitHub schedule은 몇 시간씩 밀려서 안 씀. cron-job.org가 dispatch로 실행
   # 수집: 평일 KST 08:00~18:50 10분마다, 요약: 평일 KST 19:05
+  # 모의투자: 매수 평일 08:40, 매도 평일 15:20
   workflow_dispatch:
     inputs:
       command:
         type: choice
-        options: [collect, summary]
+        options: [collect, summary, buy, sell]
         default: collect
 
 concurrency:
@@ -25,12 +26,15 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_ACCOUNT: ${{ secrets.KIS_ACCOUNT }}
     steps:
       - uses: actions/checkout@v5
       - name: run
         run: |
-          if [ "${{ inputs.command }}" = "summary" ]; then
-            python3 bot.py summary
-          else
-            python3 bot.py
-          fi
+          case "${{ inputs.command }}" in
+            summary) python3 bot.py summary ;;
+            buy|sell) python3 trader.py ${{ inputs.command }} ;;
+            *) python3 bot.py ;;
+          esac
