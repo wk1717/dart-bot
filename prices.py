@@ -66,9 +66,10 @@ def main():
         if fresh(s):
             continue
         rows = fetch_chart(s)
-        save(s, rows)
-        if not rows:
+        if not rows:  # 빈 응답으로 기존 파일 덮어쓰지 않음
             empty.append(s)
+            continue
+        save(s, rows)
         if n % 100 == 0:
             print(f"{datetime.now():%H:%M:%S} {n}/{len(symbols)}", flush=True)
         time.sleep(0.1)
