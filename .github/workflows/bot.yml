@@ -3,7 +3,7 @@ name: dart-bot
 on:
   # GitHub schedule은 몇 시간씩 밀려서 안 씀. cron-job.org가 dispatch로 실행
   # 수집: 평일 KST 08:00~18:50 10분마다, 요약: 평일 KST 19:05
-  # 모의투자: 매수 평일 08:40, 매도 평일 15:20, 수익 정산 평일 15:40
+  # 모의투자: 매수 평일 08:40 (실패분 09:05 재시도), 매도 평일 15:20, 수익 정산 평일 15:40
   workflow_dispatch:
     inputs:
       command:
@@ -12,7 +12,8 @@ on:
         default: collect
 
 concurrency:
-  group: dart-bot
+  # 명령별로 줄을 따로 섬. 한 줄이면 대기 중인 매매가 다음 수집에 밀려 취소될 수 있음
+  group: dart-bot-${{ inputs.command || 'collect' }}
   cancel-in-progress: false
 
 jobs:
