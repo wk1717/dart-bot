@@ -259,6 +259,17 @@ class TraderTest(unittest.TestCase):
         self.assertTrue(trader.due_to_sell("20261116", self.DAYS))   # 월 매수, 오늘 수 = 3일째
         self.assertTrue(trader.due_to_sell("20261113", self.DAYS))   # 놓쳤으면 바로 팜
 
+    def test_settle_returns(self):
+        trades = [{"rcept_no": "1", "corp_name": "가", "buy_odno": "0000011", "sell_odno": "0000021"},
+                  {"rcept_no": "2", "corp_name": "나", "buy_odno": "12", "sell_odno": "22"}]
+        filled = {"11": (10, 10000.0), "21": (10, 10500.0)}  # 나는 아직 체결 안 됨
+        closed = [{"buy_price": 100.0, "sell_price": 90.0, "sell_qty": 10}]  # 예전 거래 -10%, -100원
+        updates, lines = trader.settle_lines(trades, filled, closed)
+        self.assertEqual(updates, [("1", {"buy_price": 10000.0, "sell_price": 10500.0, "sell_qty": 10})])
+        self.assertEqual(lines[0], "가 10주 +5.00% (+5,000원)")
+        self.assertIn("확인 안 됨 나", lines[1])
+        self.assertEqual(lines[2], "누적 2종목 평균 -2.50%, +4,900원 (수수료·세금 전)")
+
 
 if __name__ == "__main__":
     unittest.main()
