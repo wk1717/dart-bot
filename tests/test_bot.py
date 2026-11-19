@@ -72,6 +72,14 @@ class SupabaseUrlTest(unittest.TestCase):
                 bot.sb("GET", "runs?select=ok")
             self.assertEqual(op.call_args.args[0].full_url, "https://a.supabase.co/rest/v1/runs?select=ok")
 
+    def test_encodes_korean_query(self):
+        with mock.patch.dict(os.environ, {**ENV, "SUPABASE_URL": "https://a.supabase.co"}), \
+             mock.patch("bot.urllib.request.urlopen") as op:
+            op.return_value.__enter__.return_value.read.return_value = b"[]"
+            bot.sb("GET", "trades?category=eq.자사주취득&name=ilike.%2A삼성%2A&code=in.(Y,K)")
+        self.assertEqual(op.call_args.args[0].full_url, "https://a.supabase.co/rest/v1/trades?category=eq.%EC%9E%90%EC%82%AC%EC%A3%BC%EC%B7%A8%EB%93%9D"
+                         "&name=ilike.%2A%EC%82%BC%EC%84%B1%2A&code=in.(Y,K)")
+
 
 @mock.patch.dict(os.environ, ENV)
 class CollectTest(unittest.TestCase):
