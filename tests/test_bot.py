@@ -12,6 +12,7 @@ import analyze
 import backfill
 import bot
 import prices
+import trader
 
 TODAY = date.today().strftime("%Y%m%d")
 _raw = json.loads((Path(__file__).parent / "fixtures" / "list_page1.json").read_text())
@@ -235,6 +236,28 @@ class AnalyzeTest(unittest.TestCase):
         (d / "X.csv").write_text(csv_text)
         with mock.patch("prices.PRICE_DIR", d):
             self.assertEqual(analyze.load_prices("X"), [("20261102", 100.0, 100.0)])
+
+
+class TraderTest(unittest.TestCase):
+    DAYS = ["20261113", "20261116", "20261117"]  # 금, 월, 화 → 오늘은 수 20261118
+
+    def row(self, no, dt, code, nm="주요사항보고서(자기주식취득결정)"):
+        return {"rcept_no": no, "rcept_dt": dt, "stock_code": code, "report_nm": nm}
+
+    def test_pick_only_previous_trading_day(self):
+        rows = [self.row("1", "20261116", "A"),          # 월요일 공시 → 화요일에 샀어야 함
+                self.row("2", "20261117", "B"),          # 화요일 공시 → 오늘 매수
+                self.row("3", "20261117", "C", "[기재정정]주요사항보고서(자기주식취득결정)"),
+                self.row("4", "20261117", "D"),          # 이미 보유
+                self.row("5", "20261117", "E"),          # 이미 처리
+                self.row("6", "20261117", "B")]          # 같은 종목 두 번
+        got = trader.pick_signals(rows, self.DAYS, done={"5"}, held={"D"})
+        self.assertEqual([r["rcept_no"] for r in got], ["2"])
+
+    def test_sell_on_third_trading_day(self):
+        self.assertFalse(trader.due_to_sell("20261117", self.DAYS))  # 화 매수, 오늘 수 = 2일째
+        self.assertTrue(trader.due_to_sell("20261116", self.DAYS))   # 월 매수, 오늘 수 = 3일째
+        self.assertTrue(trader.due_to_sell("20261113", self.DAYS))   # 놓쳤으면 바로 팜
 
 
 if __name__ == "__main__":
