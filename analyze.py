@@ -91,7 +91,9 @@ def main():
     cache, results, dropped = {}, defaultdict(lambda: defaultdict(list)), defaultdict(Counter)
     events = load_events()
     for e in events:
-        stock = cache.setdefault(e["stock_code"], load_prices(e["stock_code"]))
+        if e["stock_code"] not in cache:
+            cache[e["stock_code"]] = load_prices(e["stock_code"])
+        stock = cache[e["stock_code"]]
         ret, reason = event_returns(e, stock, index[e["corp_cls"]])
         if reason:
             dropped[e["category"]][reason] += 1
