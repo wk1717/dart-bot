@@ -3,12 +3,12 @@ name: dart-bot
 on:
   # GitHub schedule은 몇 시간씩 밀려서 안 씀. cron-job.org가 dispatch로 실행
   # 수집: 평일 KST 08:00~18:50 10분마다, 요약: 평일 KST 19:05
-  # 모의투자: 매수 평일 08:40, 매도 평일 15:20
+  # 모의투자: 매수 평일 08:40, 매도 평일 15:20, 수익 정산 평일 15:40
   workflow_dispatch:
     inputs:
       command:
         type: choice
-        options: [collect, summary, buy, sell]
+        options: [collect, summary, buy, sell, settle]
         default: collect
 
 concurrency:
@@ -35,6 +35,6 @@ jobs:
         run: |
           case "${{ inputs.command }}" in
             summary) python3 bot.py summary ;;
-            buy|sell) python3 trader.py ${{ inputs.command }} ;;
+            buy|sell|settle) python3 trader.py ${{ inputs.command }} ;;
             *) python3 bot.py ;;
           esac

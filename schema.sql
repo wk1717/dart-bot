@@ -13,7 +13,8 @@ create table if not exists alerts (key text primary key, sent_at double precisio
 -- 모의투자 매매 기록 (trader.py)
 create table if not exists trades (
   rcept_no text primary key, stock_code text, corp_name text, qty int,
-  buy_date text, buy_odno text, sell_date text, sell_odno text
+  buy_date text, buy_odno text, sell_date text, sell_odno text,
+  buy_price double precision, sell_price double precision, sell_qty int
 );
 
 -- anon 키로는 못 읽게. 봇은 secret 키라 상관없음

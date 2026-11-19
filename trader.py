@@ -2,6 +2,7 @@
 
 python3 trader.py buy    08:40 실행. 전 거래일 자사주취득 공시 종목을 시장가 매수 → 09:00 시가 체결
 python3 trader.py sell   15:20 실행. 산 날 포함 3거래일째인 종목을 시장가 매도 → 종가 체결
+python3 trader.py settle 15:40 실행. 매도 체결가로 수익률 계산해서 알림 (15:20엔 아직 체결 전)
 
 규칙은 analyze.py 결과 기준 (자사주취득 3일 평균 +1.76%)
 """
@@ -96,6 +97,16 @@ def order(side, code, qty):
     return res["output"]["ODNO"]
 
 
+def fills(start, end):
+    """주문번호 → (체결수량, 평균체결가)"""
+    res = kis("GET", "/uapi/domestic-stock/v1/trading/inquire-daily-ccld", "VTTC8001R", {
+        **account(), "INQR_STRT_DT": start, "INQR_END_DT": end, "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00",
+        "PDNO": "", "CCLD_DVSN": "01", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_DVSN_3": "00", "INQR_DVSN_1": "",
+        "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""})  # CCLD_DVSN 01 = 체결된 것만
+    return {r["odno"].lstrip("0"): (int(r["tot_ccld_qty"]), float(r["avg_prvs"]))
+            for r in res["output1"] if int(r["tot_ccld_qty"]) > 0}
+
+
 # --- 규칙 ---
 
 def trading_days(today):
@@ -120,6 +131,26 @@ def pick_signals(rows, days, done, held):
 def due_to_sell(buy_date, days):
     # 산 날과 오늘 사이에 거래일이 HOLD_DAYS-2개 있으면 오늘이 HOLD_DAYS번째
     return sum(buy_date < d for d in days) >= HOLD_DAYS - 2
+
+
+def settle_lines(trades, filled, closed):
+    """(DB에 쓸 값, 알림 줄). closed = 이미 정산된 거래 (누적 계산용)"""
+    updates, lines, done = [], [], list(closed)
+    for t in trades:
+        b, s = filled.get(t["buy_odno"].lstrip("0")), filled.get(t["sell_odno"].lstrip("0"))
+        if not b or not s:
+            lines.append(f"확인 안 됨 {t['corp_name']}: 체결 내역 없음")
+            continue
+        row = {"buy_price": b[1], "sell_price": s[1], "sell_qty": s[0]}
+        updates.append((t["rcept_no"], row))
+        done.append(row)
+        ret = s[1] / b[1] - 1
+        lines.append(f"{t['corp_name']} {s[0]}주 {ret:+.2%} ({(s[1] - b[1]) * s[0]:+,.0f}원)")
+    if updates:
+        rets = [d["sell_price"] / d["buy_price"] - 1 for d in done]
+        pnl = sum((d["sell_price"] - d["buy_price"]) * d["sell_qty"] for d in done)
+        lines.append(f"누적 {len(done)}종목 평균 {sum(rets) / len(rets):+.2%}, {pnl:+,.0f}원 (수수료·세금 전)")
+    return updates, lines
 
 
 def buy(today=None):
@@ -168,8 +199,22 @@ def sell(today=None):
     report("매도", lines)
 
 
+def settle(today=None):
+    check_env()
+    today = today or date.today().strftime("%Y%m%d")
+    trades = bot.sb("GET", "trades?select=rcept_no,corp_name,buy_date,buy_odno,sell_odno"
+                           "&sell_odno=not.is.null&sell_price=is.null")
+    if not trades:
+        return print("정산할 거래 없음")
+    closed = bot.sb("GET", "trades?select=buy_price,sell_price,sell_qty&sell_price=not.is.null")
+    updates, lines = settle_lines(trades, fills(min(t["buy_date"] for t in trades), today), closed)
+    for rcept_no, row in updates:
+        bot.sb("PATCH", f"trades?rcept_no=eq.{rcept_no}", row)
+    report("수익", lines)
+
+
 def report(kind, lines):
-    text = f"{'📈' if kind == '매수' else '📉'} {datetime.now():%m/%d} 모의투자 {kind}\n" + ("\n".join(lines) or "대상 없음")
+    text = f"{ {'매수': '📈', '매도': '📉'}.get(kind, '💰')} {datetime.now():%m/%d} 모의투자 {kind}\n" + ("\n".join(lines) or "대상 없음")
     print(text)
     if lines:
         bot.send_telegram(text)
@@ -177,10 +222,11 @@ def report(kind, lines):
 
 if __name__ == "__main__":
     cmd = sys.argv[1:2]
-    if cmd not in (["buy"], ["sell"]):
+    run = {"buy": buy, "sell": sell, "settle": settle}.get(cmd[0] if cmd else "")
+    if not run:
         sys.exit(__doc__)
     try:
-        buy() if cmd == ["buy"] else sell()
+        run()
     except Exception as e:
         bot.alert_error(f"trader {cmd[0]}: {type(e).__name__}: {e}")
         sys.exit(f"실패: {type(e).__name__}: {e}")
