@@ -5,6 +5,7 @@ python3 buyback.py
 매입 비율 = 취득예정 보통주 수 / 상장주식수
 DART 상세(tsstkAqDecsn)와 상장주식수(KIS 현재가 조회)는 data/에 캐시
 """
+import csv
 import json
 
 import analyze
@@ -13,6 +14,7 @@ import trader
 
 DETAIL_PATH = bot.ROOT / "data" / "buyback_detail.json"
 SHARES_PATH = bot.ROOT / "data" / "shares.json"
+STATS_PATH = bot.ROOT / "data" / "buyback_stats.csv"  # app.py에서 읽음
 H = 3  # 봇이 3거래일 들고 있음
 
 
@@ -71,10 +73,16 @@ def main():
     n = len(rows)
     print(f"자사주취득 {n}건 (매입 규모 모름 {missing}건 제외), {H}일 초과수익률\n")
     print(f"{'그룹':<6}{'매입 비율':>16}{'표본':>6}{'평균':>9}{'중앙값':>9}{'하락비율':>9}{'p값':>8}")
+    out = []
     for name, part in [("하위", rows[:n // 3]), ("중간", rows[n // 3:2 * n // 3]), ("상위", rows[2 * n // 3:])]:
         s = analyze.summarize([r for _, r in part])
         print(f"{name:<6}{part[0][0]:>7.2%} ~ {part[-1][0]:>6.2%}{s['n']:>6}{s['mean']:>+9.2%}{s['median']:>+9.2%}"
               f"{s['down']:>9.0%}{s['p']:>8.3f}")
+        out.append({"group": name, "ratio_min": part[0][0], "ratio_max": part[-1][0], **s})
+    with STATS_PATH.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(out[0]))
+        w.writeheader()
+        w.writerows(out)
 
 
 if __name__ == "__main__":
