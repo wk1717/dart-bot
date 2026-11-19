@@ -267,6 +267,34 @@ class TraderTest(unittest.TestCase):
         self.assertTrue(trader.due_to_sell("20261116", self.DAYS))   # 월 매수, 오늘 수 = 3일째
         self.assertTrue(trader.due_to_sell("20261113", self.DAYS))   # 놓쳤으면 바로 팜
 
+    def test_buyback_qty_matches_same_day(self):
+        detail = {"20231117000309": "654,665", "20260226004558": "-"}
+        self.assertEqual(trader.buyback_qty(detail, "20231117000309"), 654665)
+        self.assertEqual(trader.buyback_qty(detail, "20231117000243"), 654665)  # 같은 날 다시 낸 공시
+        self.assertIsNone(trader.buyback_qty(detail, "20260226004558"))        # 수량 "-"
+        self.assertIsNone(trader.buyback_qty(detail, "20250101000001"))
+
+    def test_buy_skips_small_and_buys_bigger_first(self):
+        rows = [{"rcept_no": n, "rcept_dt": "20261117", "corp_code": n, "stock_code": n, "corp_name": n,
+                 "report_nm": "주요사항보고서(자기주식취득결정)"} for n in ["small", "mid", "big"]]
+        size = {"small": "500", "mid": "2000", "big": "5000"}  # 상장주식 10만주 → 0.5%, 2%, 5%
+        sb_calls = []
+
+        def sb(method, path, body=None, *a, **k):
+            sb_calls.append((method, path, body))
+            return rows if path.startswith("disclosures") else []
+
+        with mock.patch.object(trader, "MAX_HOLD", 1), mock.patch("trader.check_env"), \
+             mock.patch("trader.trading_days", return_value=self.DAYS), mock.patch("bot.sb", sb), \
+             mock.patch("trader.dart_buyback", side_effect=lambda c, b, e: {c: size[c]}), \
+             mock.patch("trader.quote", return_value=(10000, 100000)), \
+             mock.patch("trader.order", return_value="1") as order, mock.patch("bot.send_telegram") as send:
+            trader.buy("20261118")
+        order.assert_called_once_with("buy", "big", 100)  # 자리 1개 → 제일 큰 것
+        text = send.call_args.args[0]
+        self.assertIn("건너뜀 small: 매입 비율 0.50%", text)
+        self.assertIn("매수 big(big) 100주, 매입 비율 5.00%", text)
+
     def test_settle_returns(self):
         trades = [{"rcept_no": "1", "corp_name": "가", "buy_odno": "0000011", "sell_odno": "0000021"},
                   {"rcept_no": "2", "corp_name": "나", "buy_odno": "12", "sell_odno": "22"}]
