@@ -30,6 +30,11 @@ def load_recent(days):
         offset += 1000
 
 
+@st.cache_data(ttl=60)
+def load_trades():
+    return pd.DataFrame(bot.sb("GET", "trades?select=*&order=buy_date.desc"))
+
+
 @st.cache_data(ttl=600)
 def search(name):
     q = urllib.parse.quote(f"*{name}*")
@@ -41,7 +46,7 @@ def search(name):
 st.title("dart-bot")
 st.caption("DART 공시 유형별로 공시 뒤 주가가 어떻게 움직였는지")
 
-tab1, tab4, tab2, tab3 = st.tabs(["유형별 결과", "자사주 매입 규모", "공시 추이", "회사 검색"])
+tab1, tab4, tab5, tab2, tab3 = st.tabs(["유형별 결과", "자사주 매입 규모", "모의투자", "공시 추이", "회사 검색"])
 
 with tab1:
     stats = load_stats()
@@ -111,6 +116,40 @@ with tab4:
         })
         st.caption(f"모의투자 봇은 매입 비율 {trader.MIN_RATIO:.0%} 미만은 안 사고, 큰 것부터 삼 · "
                    "상장주식수는 현재 기준이라 오래된 공시는 그사이 증자·감자만큼 어긋남")
+
+with tab5:
+    st.markdown(f"""
+**규칙** (KIS 모의계좌)
+1. 대상: 전 거래일 **{trader.CATEGORY}** 공시 (정정공시 제외)
+2. 매입 비율(취득예정 주식 / 상장주식)이 **{trader.MIN_RATIO:.0%} 미만**이거나 규모를 모르면 안 삼
+3. 매입 비율 **큰 것부터**, 최대 **{trader.MAX_HOLD}종목**
+4. 08:40 종목당 **{trader.BUDGET:,}원** 시장가 매수 → 09:00 시가 체결 (거절되면 09:05 재시도)
+5. 이미 가진 종목, 1주가 {trader.BUDGET:,}원 넘는 종목 제외
+6. 산 날 포함 **{trader.HOLD_DAYS}거래일째 15:20** 시장가 매도 → 종가 체결
+7. 15:40 체결가로 수익률 계산 → 텔레그램
+""")
+    trades = load_trades()
+    if trades.empty:
+        st.info("아직 거래 없음")
+    else:
+        done = trades.dropna(subset=["sell_price"])
+        ret = done["sell_price"] / done["buy_price"] - 1
+        if len(done):
+            st.write(f"끝난 거래 **{len(done)}건**, 평균 **{ret.mean():+.2%}** (수수료·세금 전)")
+        st.dataframe(pd.DataFrame({
+            "종목": trades["corp_name"],
+            "산 날": pd.to_datetime(trades["buy_date"]).dt.strftime("%m/%d"),
+            "상태": ["보유 중" if pd.isna(d) else ("매도 완료" if pd.notna(p) else "매도 주문, 정산 전")
+                   for d, p in zip(trades["sell_date"], trades["sell_price"])],
+            "수량": trades["sell_qty"].fillna(trades["qty"]).astype(int),
+            "산 가격": trades["buy_price"],
+            "판 가격": trades["sell_price"],
+            "수익률": (trades["sell_price"] / trades["buy_price"] - 1) * 100,
+        }), hide_index=True, column_config={
+            "산 가격": st.column_config.NumberColumn(format="%,.0f"),
+            "판 가격": st.column_config.NumberColumn(format="%,.0f"),
+            "수익률": st.column_config.NumberColumn(format="%+.2f%%"),
+        })
 
 with tab2:
     days = st.select_slider("기간", [30, 90, 180, 365], value=90, format_func=lambda d: f"최근 {d}일")
