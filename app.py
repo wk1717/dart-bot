@@ -1,4 +1,7 @@
+import time
 import urllib.parse
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
@@ -41,10 +44,18 @@ def load_account():
     return bot.sb("GET", "account?select=*&id=eq.1")
 
 
-@st.cache_data(ttl=60)
-def load_now(codes):
-    """종목코드 → 현재가. 네이버 일봉의 오늘 종가 = 장중 현재가"""
+@st.cache_data(max_entries=20)
+def load_now(codes, slot):
+    """종목코드 → 현재가. 네이버 일봉의 오늘 종가 = 장중 현재가. slot이 바뀔 때만 새로 받음"""
     return {c: int(prices.fetch_chart(c, 1)[-1][4]) for c in codes}
+
+
+def price_slot():
+    # 장중(평일 09:00~15:35)엔 10초마다 새 값, 그 밖엔 하루 한 번
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    if now.weekday() < 5 and "0900" <= f"{now:%H%M}" <= "1535":
+        return int(time.time() // 10)
+    return f"{now:%Y%m%d}"
 
 
 @st.cache_data(ttl=600)
@@ -133,39 +144,50 @@ with tab5:
     st.markdown(f"**대상** 전 거래일 {trader.CATEGORY} 공시 · 매입 비율 {trader.MIN_RATIO:.0%} 이상, 큰 순  \n"
                 f"**매수** 09:00 시초가 · 종목당 {trader.BUDGET // 10_000:,}만원 · 최대 {trader.MAX_HOLD}종목  \n"
                 f"**매도** 매수일 포함 {trader.HOLD_DAYS}거래일째 종가")
-    acc = load_account()
-    trades = load_trades()
-    held = trades[trades["sell_date"].isna()] if len(trades) else trades
-    now = load_now(tuple(held["stock_code"])) if len(held) else {}
-    if acc:
-        value = sum(now[c] * q for c, q in zip(held["stock_code"], held["qty"]))
-        c1, c2 = st.columns(2)
-        c1.metric("예수금 (D+2)", f"{acc[0]['cash']:,}원")
-        c2.metric("추정자산", f"{acc[0]['cash'] + value:,}원")
-    if trades.empty:
-        st.info("아직 거래 없음")
-    else:
-        cur = trades["stock_code"].map(now).where(trades["sell_date"].isna())
-        done = trades.dropna(subset=["sell_price"])
-        ret = done["sell_price"] / done["buy_price"] - 1
-        if len(done):
-            st.write(f"청산 **{len(done)}건**, 평균 실현수익률 **{ret.mean():+.2%}** (수수료·세금 전)")
-        st.dataframe(pd.DataFrame({
-            "종목": trades["corp_name"],
-            "매수일": pd.to_datetime(trades["buy_date"]).dt.strftime("%m/%d"),
-            "상태": ["보유" if pd.isna(d) else ("청산" if pd.notna(p) else "매도 주문 (정산 대기)")
-                   for d, p in zip(trades["sell_date"], trades["sell_price"])],
-            "수량(주)": trades["sell_qty"].fillna(trades["qty"]).astype(int),
-            "매수 평균가": trades["buy_price"],
-            "현재가": cur,
-            "매도 평균가": trades["sell_price"],
-            "수익률": (trades["sell_price"].fillna(cur) / trades["buy_price"] - 1) * 100,
-        }), hide_index=True, column_config={
-            **{c: st.column_config.Column(alignment="left") for c in ["종목", "매수일", "상태", "수량(주)"]},
-            **{c: st.column_config.NumberColumn(format="%,.0f", alignment="left")
-               for c in ["매수 평균가", "현재가", "매도 평균가"]},
-            "수익률": st.column_config.NumberColumn(format="%+.2f%%", alignment="left"),
-        })
+
+    @st.fragment(run_every="10s")
+    def trade_board():
+        acc = load_account()
+        trades = load_trades()
+        held = trades[trades["sell_date"].isna()] if len(trades) else trades
+        try:
+            now = load_now(tuple(held["stock_code"]), price_slot()) if len(held) else {}
+        except Exception:  # 네이버가 막히면 현재가만 비우고 표는 그대로
+            now = {}
+        if acc:
+            c1, c2 = st.columns(2)
+            c1.metric("예수금 (D+2)", f"{acc[0]['cash']:,}원")
+            if all(c in now for c in held["stock_code"]):
+                value = sum(now[c] * q for c, q in zip(held["stock_code"], held["qty"]))
+                c2.metric("추정자산", f"{acc[0]['cash'] + value:,}원")
+            else:
+                c2.metric("추정자산", "-")
+        if trades.empty:
+            st.info("아직 거래 없음")
+        else:
+            cur = trades["stock_code"].map(now).where(trades["sell_date"].isna())
+            done = trades.dropna(subset=["sell_price"])
+            ret = done["sell_price"] / done["buy_price"] - 1
+            if len(done):
+                st.write(f"청산 **{len(done)}건**, 평균 실현수익률 **{ret.mean():+.2%}** (수수료·세금 전)")
+            st.dataframe(pd.DataFrame({
+                "종목": trades["corp_name"],
+                "매수일": pd.to_datetime(trades["buy_date"]).dt.strftime("%m/%d"),
+                "상태": ["보유" if pd.isna(d) else ("청산" if pd.notna(p) else "매도 주문 (정산 대기)")
+                       for d, p in zip(trades["sell_date"], trades["sell_price"])],
+                "수량(주)": trades["sell_qty"].fillna(trades["qty"]).astype(int),
+                "매수 평균가": trades["buy_price"],
+                "현재가": cur,
+                "매도 평균가": trades["sell_price"],
+                "수익률": (trades["sell_price"].fillna(cur) / trades["buy_price"] - 1) * 100,
+            }), hide_index=True, column_config={
+                **{c: st.column_config.Column(alignment="left") for c in ["종목", "매수일", "상태", "수량(주)"]},
+                **{c: st.column_config.NumberColumn(format="%,.0f", alignment="left")
+                   for c in ["매수 평균가", "현재가", "매도 평균가"]},
+                "수익률": st.column_config.NumberColumn(format="%+.2f%%", alignment="left"),
+            })
+
+    trade_board()
 
 with tab2:
     days = st.select_slider("기간", [30, 90, 180, 365], value=90, format_func=lambda d: f"최근 {d}일")
