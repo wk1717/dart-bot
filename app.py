@@ -46,8 +46,8 @@ def load_account():
 
 @st.cache_data(max_entries=20)
 def load_now(codes, slot):
-    """종목코드 → 현재가. 네이버 일봉의 오늘 종가 = 장중 현재가. slot이 바뀔 때만 새로 받음"""
-    return {c: int(prices.fetch_chart(c, 1)[-1][4]) for c in codes}
+    """slot이 바뀔 때만 새로 받음"""
+    return prices.fetch_now(codes)
 
 
 def price_slot():

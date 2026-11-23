@@ -1,4 +1,5 @@
 """오프라인 테스트. DART 응답은 가짜 픽스처, Supabase는 FakeSB로 대체"""
+import io
 import json
 import os
 import tempfile
@@ -364,6 +365,15 @@ class TraderTest(unittest.TestCase):
             trader.save_cash()
         body = sb.call_args.args[2]
         self.assertEqual((body["id"], body["cash"], body["total"]), (1, 8007200, 9992960))
+
+
+class FetchNowTest(unittest.TestCase):
+    def test_parses_comma_price(self):
+        body = io.BytesIO(json.dumps({"datas": [{"itemCode": "005930", "closePrice": "175,700"},
+                                                {"itemCode": "002450", "closePrice": "991"}]}).encode())
+        with mock.patch("urllib.request.urlopen", return_value=body) as urlopen:
+            self.assertEqual(prices.fetch_now(("005930", "002450")), {"005930": 175700, "002450": 991})
+        self.assertTrue(urlopen.call_args.args[0].full_url.endswith("/005930,002450"))
 
 
 if __name__ == "__main__":
