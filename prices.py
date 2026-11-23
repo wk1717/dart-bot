@@ -6,6 +6,7 @@ python3 prices.py
 오늘 받은 파일은 건너뜀 → 끊겨도 다시 돌리면 이어서 함
 """
 import csv
+import json
 import time
 import urllib.parse
 import urllib.request
@@ -32,6 +33,14 @@ def fetch_chart(symbol, count=1000):
     req = urllib.request.Request(CHART_URL.format(symbol, count), headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=20) as r:
         return parse_chart(r.read().decode("euc-kr"))
+
+
+def fetch_now(codes):
+    """종목코드 → 현재가. 네이버 증권 화면이 쓰는 실시간 시세 (일봉 차트는 장중 값이 수십 초씩 늦음)"""
+    url = "https://polling.finance.naver.com/api/realtime/domestic/stock/" + ",".join(codes)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return {d["itemCode"]: int(d["closePrice"].replace(",", "")) for d in json.load(r)["datas"]}
 
 
 def stock_codes():
