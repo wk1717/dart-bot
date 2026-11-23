@@ -191,10 +191,13 @@ def settle_lines(trades, filled, closed):
 
 def fill_buy_prices():
     """buy_price 빈 거래에 매수 체결가 채움. 아직 체결 안 된 건 다음에"""
-    for t in bot.sb("GET", "trades?select=rcept_no,stock_code,buy_date&buy_price=is.null"):
-        b = fill(t["stock_code"], "buy", t["buy_date"])
-        if b:
-            bot.sb("PATCH", f"trades?rcept_no=eq.{t['rcept_no']}", {"buy_price": b[1]})
+    for t in bot.sb("GET", "trades?select=rcept_no,stock_code,corp_name,buy_date&buy_price=is.null"):
+        try:
+            b = fill(t["stock_code"], "buy", t["buy_date"])
+            if b:
+                bot.sb("PATCH", f"trades?rcept_no=eq.{t['rcept_no']}", {"buy_price": b[1]})
+        except Exception as e:  # 화면용이라 실패해도 정산·잔고 저장은 계속
+            bot.alert_error(f"trader 매수가 채우기 {t['corp_name']}: {type(e).__name__}: {e}")
 
 
 def buy(today=None):

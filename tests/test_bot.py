@@ -308,14 +308,21 @@ class TraderTest(unittest.TestCase):
         self.assertEqual(lines[2], "누적 2종목 평균 -2.50%, +4,900원 (수수료·세금 전)")
 
     def test_fill_buy_prices(self):
-        trades = [{"rcept_no": "1", "stock_code": "A", "buy_date": "20261120"},
-                  {"rcept_no": "2", "stock_code": "B", "buy_date": "20261123"}]  # B는 아직 체결 안 됨
-        with mock.patch("bot.sb", return_value=trades) as sb, \
-             mock.patch("trader.fill", side_effect=lambda c, s, d: (10, 9870.0) if c == "A" else None) as fill:
+        trades = [{"rcept_no": "0", "stock_code": "X", "corp_name": "엑스", "buy_date": "20261119"},  # 조회 실패
+                  {"rcept_no": "1", "stock_code": "A", "corp_name": "에이", "buy_date": "20261120"},
+                  {"rcept_no": "2", "stock_code": "B", "corp_name": "비", "buy_date": "20261123"}]  # 아직 체결 안 됨
+
+        def fill(c, s, d):
+            if c == "X":
+                raise RuntimeError("KIS 500")
+            return (10, 9870.0) if c == "A" else None
+
+        with mock.patch("bot.sb", return_value=trades) as sb, mock.patch("trader.fill", side_effect=fill), \
+             mock.patch("bot.alert_error") as alert:
             trader.fill_buy_prices()
-        fill.assert_any_call("A", "buy", "20261120")
         sb.assert_called_with("PATCH", "trades?rcept_no=eq.1", {"buy_price": 9870.0})
         self.assertEqual(sb.call_count, 2)  # GET 1번 + PATCH 1번
+        self.assertIn("엑스", alert.call_args.args[0])
 
     def test_fill_uses_summary(self):
         res = {"output1": [], "output2": {"tot_ccld_qty": "312", "tot_ccld_amt": "1001520"}}
