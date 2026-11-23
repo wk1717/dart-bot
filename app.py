@@ -126,19 +126,19 @@ with tab4:
             "하락 비율": st.column_config.NumberColumn(format="%.0f%%"),
             "p값": st.column_config.NumberColumn(format="%.3f"),
         })
-        st.caption(f"모의투자 봇은 매입 비율 {trader.MIN_RATIO:.0%} 미만은 안 사고, 큰 것부터 삼 · "
+        st.caption(f"모의투자 봇은 매입 비율 {trader.MIN_RATIO:.0%} 미만은 매수 제외, 비율 큰 것부터 매수 · "
                    "상장주식수는 현재 기준이라 오래된 공시는 그사이 증자·감자만큼 어긋남")
 
 with tab5:
     st.markdown(f"""
 **규칙** (KIS 모의계좌)
 1. 대상: 전 거래일 **{trader.CATEGORY}** 공시 (정정공시 제외)
-2. 매입 비율(취득예정 주식 / 상장주식)이 **{trader.MIN_RATIO:.0%} 미만**이거나 규모를 모르면 안 삼
+2. 매입 비율(취득예정 주식 / 상장주식)이 **{trader.MIN_RATIO:.0%} 미만**이거나 규모를 모르면 매수 제외
 3. 매입 비율 **큰 것부터**, 최대 **{trader.MAX_HOLD}종목**
 4. 08:40 종목당 **{trader.BUDGET:,}원** 시장가 매수 → 09:00 시가 체결 (거절되면 09:05 재시도)
-5. 이미 가진 종목, 1주가 {trader.BUDGET:,}원 넘는 종목 제외
-6. 산 날 포함 **{trader.HOLD_DAYS}거래일째 15:20** 시장가 매도 → 종가 체결
-7. 15:40 체결가로 수익률 계산 → 텔레그램
+5. 보유 중인 종목, 1주가 {trader.BUDGET:,}원 넘는 종목 제외
+6. 매수일 포함 **{trader.HOLD_DAYS}거래일째 15:20** 시장가 매도 → 종가 체결
+7. 15:40 체결가로 실현수익률 계산 → 텔레그램
 """)
     acc = load_account()
     trades = load_trades()
@@ -147,9 +147,9 @@ with tab5:
     if acc:
         value = sum(now[c] * q for c, q in zip(held["stock_code"], held["qty"]))
         c1, c2 = st.columns(2)
-        c1.metric("남은 현금 (D+2 예수금)", f"{acc[0]['cash']:,}원")
-        c2.metric("총평가 (현금 + 보유 종목 현재가)", f"{acc[0]['cash'] + value:,}원")
-        st.caption(f"현금은 {acc[0]['updated_at']} 기준 (매수 09:05, 정산 15:40에 갱신) · 현재가는 1분마다 네이버")
+        c1.metric("예수금 (D+2)", f"{acc[0]['cash']:,}원")
+        c2.metric("추정자산 (예수금 + 평가금액)", f"{acc[0]['cash'] + value:,}원")
+        st.caption(f"예수금은 {acc[0]['updated_at']} 기준 (09:05 매수, 15:40 정산 때 갱신) · 현재가는 네이버 기준, 최대 1분 늦음")
     if trades.empty:
         st.info("아직 거래 없음")
     else:
@@ -157,21 +157,21 @@ with tab5:
         done = trades.dropna(subset=["sell_price"])
         ret = done["sell_price"] / done["buy_price"] - 1
         if len(done):
-            st.write(f"끝난 거래 **{len(done)}건**, 평균 **{ret.mean():+.2%}** (수수료·세금 전)")
+            st.write(f"청산 **{len(done)}건**, 평균 실현수익률 **{ret.mean():+.2%}** (수수료·세금 전)")
         st.dataframe(pd.DataFrame({
             "종목": trades["corp_name"],
-            "산 날": pd.to_datetime(trades["buy_date"]).dt.strftime("%m/%d"),
-            "상태": ["보유 중" if pd.isna(d) else ("매도 완료" if pd.notna(p) else "매도 주문, 정산 전")
+            "매수일": pd.to_datetime(trades["buy_date"]).dt.strftime("%m/%d"),
+            "상태": ["보유" if pd.isna(d) else ("청산" if pd.notna(p) else "매도 주문 (정산 대기)")
                    for d, p in zip(trades["sell_date"], trades["sell_price"])],
-            "수량": trades["sell_qty"].fillna(trades["qty"]).astype(int),
-            "산 가격": trades["buy_price"],
+            "수량(주)": trades["sell_qty"].fillna(trades["qty"]).astype(int),
+            "매수 평균가": trades["buy_price"],
             "현재가": cur,
-            "판 가격": trades["sell_price"],
+            "매도 평균가": trades["sell_price"],
             "수익률": (trades["sell_price"].fillna(cur) / trades["buy_price"] - 1) * 100,
         }), hide_index=True, column_config={
-            "산 가격": st.column_config.NumberColumn(format="%,.0f"),
+            "매수 평균가": st.column_config.NumberColumn(format="%,.0f"),
             "현재가": st.column_config.NumberColumn(format="%,.0f"),
-            "판 가격": st.column_config.NumberColumn(format="%,.0f"),
+            "매도 평균가": st.column_config.NumberColumn(format="%,.0f"),
             "수익률": st.column_config.NumberColumn(format="%+.2f%%"),
         })
 
