@@ -320,9 +320,34 @@ class TraderTest(unittest.TestCase):
         with mock.patch("bot.sb", return_value=trades) as sb, mock.patch("trader.fill", side_effect=fill), \
              mock.patch("bot.alert_error") as alert:
             trader.fill_buy_prices()
-        sb.assert_called_with("PATCH", "trades?rcept_no=eq.1", {"buy_price": 9870.0})
+        self.assertIn("sell_date=is.null", sb.call_args_list[0].args[1])  # buy_price 있어도 보유 중이면 다시 채움
+        sb.assert_called_with("PATCH", "trades?rcept_no=eq.1", {"qty": 10, "buy_price": 9870.0})
         self.assertEqual(sb.call_count, 2)  # GET 1번 + PATCH 1번
         self.assertIn("엑스", alert.call_args.args[0])
+
+    def test_settle_skips_failed_lookup(self):
+        trades = [{"rcept_no": "1", "corp_name": "가", "stock_code": "A", "buy_date": "20261118", "sell_date": "20261120",
+                   "buy_odno": "11", "sell_odno": "21"},
+                  {"rcept_no": "2", "corp_name": "나", "stock_code": "B", "buy_date": "20261118", "sell_date": "20261120",
+                   "buy_odno": "12", "sell_odno": "22"}]
+
+        def sb(method, path, body=None, *a, **k):
+            return trades if "sell_odno=not.is.null" in path else []
+
+        def fill(c, side, d):
+            if c == "B":
+                raise RuntimeError("KIS 500")
+            return (10, 10000.0) if side == "buy" else (10, 10500.0)
+
+        with mock.patch("trader.check_env"), mock.patch("bot.sb", side_effect=sb) as sbm, \
+             mock.patch("trader.fill", side_effect=fill), mock.patch("trader.fill_buy_prices"), \
+             mock.patch("trader.save_cash") as save, mock.patch("bot.send_telegram") as send:
+            trader.settle("20261120")
+        sbm.assert_any_call("PATCH", "trades?rcept_no=eq.1", {"buy_price": 10000.0, "sell_price": 10500.0, "sell_qty": 10})
+        text = send.call_args.args[0]
+        self.assertIn("실패 나: KIS 500", text)
+        self.assertIn("가 10주 +5.00%", text)
+        save.assert_called_once()
 
     def test_fill_uses_summary(self):
         res = {"output1": [], "output2": {"tot_ccld_qty": "312", "tot_ccld_amt": "1001520"}}

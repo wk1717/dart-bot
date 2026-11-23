@@ -190,12 +190,12 @@ def settle_lines(trades, filled, closed):
 
 
 def fill_buy_prices():
-    """buy_price 빈 거래에 매수 체결가 채움. 아직 체결 안 된 건 다음에"""
-    for t in bot.sb("GET", "trades?select=rcept_no,stock_code,corp_name,buy_date&buy_price=is.null"):
+    """보유 중인 거래의 매수 체결가·수량을 매번 다시 채움 (부분 체결 뒤 더 체결될 수 있음). 체결 없으면 다음에"""
+    for t in bot.sb("GET", "trades?select=rcept_no,stock_code,corp_name,buy_date&sell_date=is.null"):
         try:
             b = fill(t["stock_code"], "buy", t["buy_date"])
             if b:
-                bot.sb("PATCH", f"trades?rcept_no=eq.{t['rcept_no']}", {"buy_price": b[1]})
+                bot.sb("PATCH", f"trades?rcept_no=eq.{t['rcept_no']}", {"qty": b[0], "buy_price": b[1]})
         except Exception as e:  # 화면용이라 실패해도 정산·잔고 저장은 계속
             bot.alert_error(f"trader 매수가 채우기 {t['corp_name']}: {type(e).__name__}: {e}")
 
@@ -265,19 +265,23 @@ def sell(today=None):
 def settle(today=None):
     check_env()
     today = today or date.today().strftime("%Y%m%d")
-    fill_buy_prices()  # 09:05에 못 채운 것 (재시도 매수 등)
+    fill_buy_prices()  # 09:05 뒤 재시도·추가 체결분
     trades = bot.sb("GET", "trades?select=rcept_no,corp_name,stock_code,buy_date,sell_date,buy_odno,sell_odno"
                            "&sell_odno=not.is.null&sell_price=is.null")
     if trades:
         closed = bot.sb("GET", "trades?select=buy_price,sell_price,sell_qty&sell_price=not.is.null")
-        filled = {}
-        for t in trades:
-            filled[t["buy_odno"].lstrip("0")] = fill(t["stock_code"], "buy", t["buy_date"])
-            filled[t["sell_odno"].lstrip("0")] = fill(t["stock_code"], "sell", t["sell_date"])
-        updates, lines = settle_lines(trades, filled, closed)
+        filled, ok, failed = {}, [], []
+        for t in trades:  # 한 종목 조회가 실패해도 나머지는 정산. 실패한 건 내일 다시
+            try:
+                filled[t["buy_odno"].lstrip("0")] = fill(t["stock_code"], "buy", t["buy_date"])
+                filled[t["sell_odno"].lstrip("0")] = fill(t["stock_code"], "sell", t["sell_date"])
+                ok.append(t)
+            except Exception as e:
+                failed.append(f"실패 {t['corp_name']}: {e}")
+        updates, lines = settle_lines(ok, filled, closed)
         for rcept_no, row in updates:
             bot.sb("PATCH", f"trades?rcept_no=eq.{rcept_no}", row)
-        report("수익", lines)
+        report("수익", failed + lines)
     else:
         print("정산할 거래 없음")
     save_cash()  # 정산 끝난 뒤에. 잔고 저장이 실패해도 정산은 됨
