@@ -35,6 +35,11 @@ def load_trades():
     return pd.DataFrame(bot.sb("GET", "trades?select=*&order=buy_date.desc"))
 
 
+@st.cache_data(ttl=60)
+def load_account():
+    return bot.sb("GET", "account?select=*&id=eq.1")
+
+
 @st.cache_data(ttl=600)
 def search(name):
     q = urllib.parse.quote(f"*{name}*")
@@ -128,6 +133,12 @@ with tab5:
 6. 산 날 포함 **{trader.HOLD_DAYS}거래일째 15:20** 시장가 매도 → 종가 체결
 7. 15:40 체결가로 수익률 계산 → 텔레그램
 """)
+    acc = load_account()
+    if acc:
+        c1, c2 = st.columns(2)
+        c1.metric("남은 현금 (D+2 예수금)", f"{acc[0]['cash']:,}원")
+        c2.metric("총평가", f"{acc[0]['total']:,}원")
+        st.caption(f"{acc[0]['updated_at']} 기준 · 매수 09:05, 정산 15:40에 갱신")
     trades = load_trades()
     if trades.empty:
         st.info("아직 거래 없음")
