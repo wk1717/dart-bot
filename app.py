@@ -6,6 +6,7 @@ import streamlit as st
 
 import analyze
 import bot
+import prices
 import trader
 
 st.set_page_config(page_title="dart-bot", layout="wide")
@@ -38,6 +39,12 @@ def load_trades():
 @st.cache_data(ttl=60)
 def load_account():
     return bot.sb("GET", "account?select=*&id=eq.1")
+
+
+@st.cache_data(ttl=60)
+def load_now(codes):
+    """종목코드 → 현재가. 네이버 일봉의 오늘 종가 = 장중 현재가"""
+    return {c: int(prices.fetch_chart(c, 1)[-1][4]) for c in codes}
 
 
 @st.cache_data(ttl=600)
@@ -134,15 +141,19 @@ with tab5:
 7. 15:40 체결가로 수익률 계산 → 텔레그램
 """)
     acc = load_account()
+    trades = load_trades()
+    held = trades[trades["sell_date"].isna()] if len(trades) else trades
+    now = load_now(tuple(held["stock_code"])) if len(held) else {}
     if acc:
+        value = sum(now[c] * q for c, q in zip(held["stock_code"], held["qty"]))
         c1, c2 = st.columns(2)
         c1.metric("남은 현금 (D+2 예수금)", f"{acc[0]['cash']:,}원")
-        c2.metric("총평가", f"{acc[0]['total']:,}원")
-        st.caption(f"{acc[0]['updated_at']} 기준 · 매수 09:05, 정산 15:40에 갱신")
-    trades = load_trades()
+        c2.metric("총평가 (현금 + 보유 종목 현재가)", f"{acc[0]['cash'] + value:,}원")
+        st.caption(f"현금은 {acc[0]['updated_at']} 기준 (매수 09:05, 정산 15:40에 갱신) · 현재가는 1분마다 네이버")
     if trades.empty:
         st.info("아직 거래 없음")
     else:
+        cur = trades["stock_code"].map(now).where(trades["sell_date"].isna())
         done = trades.dropna(subset=["sell_price"])
         ret = done["sell_price"] / done["buy_price"] - 1
         if len(done):
@@ -154,10 +165,12 @@ with tab5:
                    for d, p in zip(trades["sell_date"], trades["sell_price"])],
             "수량": trades["sell_qty"].fillna(trades["qty"]).astype(int),
             "산 가격": trades["buy_price"],
+            "현재가": cur,
             "판 가격": trades["sell_price"],
-            "수익률": (trades["sell_price"] / trades["buy_price"] - 1) * 100,
+            "수익률": (trades["sell_price"].fillna(cur) / trades["buy_price"] - 1) * 100,
         }), hide_index=True, column_config={
             "산 가격": st.column_config.NumberColumn(format="%,.0f"),
+            "현재가": st.column_config.NumberColumn(format="%,.0f"),
             "판 가격": st.column_config.NumberColumn(format="%,.0f"),
             "수익률": st.column_config.NumberColumn(format="%+.2f%%"),
         })
