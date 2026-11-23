@@ -161,10 +161,10 @@ with tab5:
             "매도 평균가": trades["sell_price"],
             "수익률": (trades["sell_price"].fillna(cur) / trades["buy_price"] - 1) * 100,
         }), hide_index=True, column_config={
-            **{c: st.column_config.Column(alignment="center") for c in ["종목", "매수일", "상태", "수량(주)"]},
-            **{c: st.column_config.NumberColumn(format="%,.0f", alignment="center")
+            **{c: st.column_config.Column(alignment="left") for c in ["종목", "매수일", "상태", "수량(주)"]},
+            **{c: st.column_config.NumberColumn(format="%,.0f", alignment="left")
                for c in ["매수 평균가", "현재가", "매도 평균가"]},
-            "수익률": st.column_config.NumberColumn(format="%+.2f%%", alignment="center"),
+            "수익률": st.column_config.NumberColumn(format="%+.2f%%", alignment="left"),
         })
 
 with tab2:
