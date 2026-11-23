@@ -2,6 +2,7 @@
 
 python3 trader.py buy    08:40 실행. 전 거래일 자사주취득 공시 종목을 시장가 매수 → 09:00 시가 체결
                          09:05에 한 번 더 실행. 08:40 주문이 거절된 것만 다시 삼 (산 건 trades에 있어서 건너뜀)
+                         끝에 체결된 매수가를 buy_price에, 계좌 잔고를 account에 저장 (화면용)
 python3 trader.py sell   15:20 실행. 산 날 포함 3거래일째인 종목을 시장가 매도 → 종가 체결
 python3 trader.py settle 15:40 실행. 매도 체결가로 수익률 계산해서 알림 (15:20엔 아직 체결 전)
 
@@ -106,12 +107,22 @@ def buyback_qty(detail, rcept_no):
     return int(v) if v.isdigit() else None
 
 
-def holdings():
-    res = kis("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", "VTTC8434R", {
+def balance():
+    return kis("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", "VTTC8434R", {
         **account(), "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01",
         "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00",
         "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""})
-    return {r["pdno"]: int(r["hldg_qty"]) for r in res["output1"] if int(r["hldg_qty"]) > 0}
+
+
+def holdings():
+    return {r["pdno"]: int(r["hldg_qty"]) for r in balance()["output1"] if int(r["hldg_qty"]) > 0}
+
+
+def save_cash():
+    """화면용 계좌 잔고. 예수금은 D+2 기준 (결제 전 매매까지 반영)"""
+    o = balance()["output2"][0]
+    bot.sb("POST", "account", {"id": 1, "cash": int(o["prvs_rcdl_excc_amt"]), "total": int(o["tot_evlu_amt"]),
+                               "updated_at": f"{datetime.now():%Y-%m-%d %H:%M}"}, "resolution=merge-duplicates")
 
 
 def order(side, code, qty):
@@ -121,14 +132,15 @@ def order(side, code, qty):
     return res["output"]["ODNO"]
 
 
-def fills(start, end):
-    """주문번호 → (체결수량, 평균체결가)"""
+def fill(code, side, day):
+    """그날 그 종목 매수(매도) 체결 (수량, 평균가). 없으면 None
+    모의투자는 주문별 목록(output1)이 늘 비어 옴 → 종목·매수매도·날짜로 좁힌 합계(output2)를 씀"""
     res = kis("GET", "/uapi/domestic-stock/v1/trading/inquire-daily-ccld", "VTTC8001R", {
-        **account(), "INQR_STRT_DT": start, "INQR_END_DT": end, "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00",
-        "PDNO": "", "CCLD_DVSN": "01", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_DVSN_3": "00", "INQR_DVSN_1": "",
-        "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""})  # CCLD_DVSN 01 = 체결된 것만
-    return {r["odno"].lstrip("0"): (int(r["tot_ccld_qty"]), float(r["avg_prvs"]))
-            for r in res["output1"] if int(r["tot_ccld_qty"]) > 0}
+        **account(), "INQR_STRT_DT": day, "INQR_END_DT": day, "SLL_BUY_DVSN_CD": {"sell": "01", "buy": "02"}[side],
+        "INQR_DVSN": "00", "PDNO": code, "CCLD_DVSN": "01", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_DVSN_3": "00",
+        "INQR_DVSN_1": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""})  # CCLD_DVSN 01 = 체결된 것만
+    qty = int(res["output2"]["tot_ccld_qty"] or 0)
+    return (qty, int(res["output2"]["tot_ccld_amt"]) / qty) if qty else None
 
 
 # --- 규칙 ---
@@ -177,6 +189,14 @@ def settle_lines(trades, filled, closed):
     return updates, lines
 
 
+def fill_buy_prices():
+    """buy_price 빈 거래에 매수 체결가 채움. 아직 체결 안 된 건 다음에"""
+    for t in bot.sb("GET", "trades?select=rcept_no,stock_code,buy_date&buy_price=is.null"):
+        b = fill(t["stock_code"], "buy", t["buy_date"])
+        if b:
+            bot.sb("PATCH", f"trades?rcept_no=eq.{t['rcept_no']}", {"buy_price": b[1]})
+
+
 def buy(today=None):
     check_env()
     today = today or date.today().strftime("%Y%m%d")
@@ -215,6 +235,8 @@ def buy(today=None):
                                   "corp_name": r["corp_name"], "qty": qty, "buy_date": today, "buy_odno": odno})
         lines.append(f"매수 {r['corp_name']}({r['stock_code']}) {qty}주, 매입 비율 {ratio:.2%}")
     report("매수", lines)
+    fill_buy_prices()
+    save_cash()
 
 
 def sell(today=None):
@@ -240,15 +262,22 @@ def sell(today=None):
 def settle(today=None):
     check_env()
     today = today or date.today().strftime("%Y%m%d")
-    trades = bot.sb("GET", "trades?select=rcept_no,corp_name,buy_date,buy_odno,sell_odno"
+    fill_buy_prices()  # 09:05에 못 채운 것 (재시도 매수 등)
+    trades = bot.sb("GET", "trades?select=rcept_no,corp_name,stock_code,buy_date,sell_date,buy_odno,sell_odno"
                            "&sell_odno=not.is.null&sell_price=is.null")
-    if not trades:
-        return print("정산할 거래 없음")
-    closed = bot.sb("GET", "trades?select=buy_price,sell_price,sell_qty&sell_price=not.is.null")
-    updates, lines = settle_lines(trades, fills(min(t["buy_date"] for t in trades), today), closed)
-    for rcept_no, row in updates:
-        bot.sb("PATCH", f"trades?rcept_no=eq.{rcept_no}", row)
-    report("수익", lines)
+    if trades:
+        closed = bot.sb("GET", "trades?select=buy_price,sell_price,sell_qty&sell_price=not.is.null")
+        filled = {}
+        for t in trades:
+            filled[t["buy_odno"].lstrip("0")] = fill(t["stock_code"], "buy", t["buy_date"])
+            filled[t["sell_odno"].lstrip("0")] = fill(t["stock_code"], "sell", t["sell_date"])
+        updates, lines = settle_lines(trades, filled, closed)
+        for rcept_no, row in updates:
+            bot.sb("PATCH", f"trades?rcept_no=eq.{rcept_no}", row)
+        report("수익", lines)
+    else:
+        print("정산할 거래 없음")
+    save_cash()  # 정산 끝난 뒤에. 잔고 저장이 실패해도 정산은 됨
 
 
 def report(kind, lines):
