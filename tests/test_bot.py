@@ -288,7 +288,8 @@ class TraderTest(unittest.TestCase):
              mock.patch("trader.trading_days", return_value=self.DAYS), mock.patch("bot.sb", sb), \
              mock.patch("trader.dart_buyback", side_effect=lambda c, b, e: {c: size[c]}), \
              mock.patch("trader.quote", return_value=(10000, 100000)), \
-             mock.patch("trader.order", return_value="1") as order, mock.patch("bot.send_telegram") as send:
+             mock.patch("trader.order", return_value="1") as order, mock.patch("bot.send_telegram") as send, \
+             mock.patch("trader.save_cash"):
             trader.buy("20261118")
         order.assert_called_once_with("buy", "big", 100)  # 자리 1개 → 제일 큰 것
         text = send.call_args.args[0]
@@ -305,6 +306,64 @@ class TraderTest(unittest.TestCase):
         self.assertEqual(lines[0], "가 10주 +5.00% (+5,000원)")
         self.assertIn("확인 안 됨 나", lines[1])
         self.assertEqual(lines[2], "누적 2종목 평균 -2.50%, +4,900원 (수수료·세금 전)")
+
+    def test_fill_buy_prices(self):
+        trades = [{"rcept_no": "0", "stock_code": "X", "corp_name": "엑스", "buy_date": "20261119"},  # 조회 실패
+                  {"rcept_no": "1", "stock_code": "A", "corp_name": "에이", "buy_date": "20261120"},
+                  {"rcept_no": "2", "stock_code": "B", "corp_name": "비", "buy_date": "20261123"}]  # 아직 체결 안 됨
+
+        def fill(c, s, d):
+            if c == "X":
+                raise RuntimeError("KIS 500")
+            return (10, 9870.0) if c == "A" else None
+
+        with mock.patch("bot.sb", return_value=trades) as sb, mock.patch("trader.fill", side_effect=fill), \
+             mock.patch("bot.alert_error") as alert:
+            trader.fill_buy_prices()
+        self.assertIn("sell_date=is.null", sb.call_args_list[0].args[1])  # buy_price 있어도 보유 중이면 다시 채움
+        sb.assert_called_with("PATCH", "trades?rcept_no=eq.1", {"qty": 10, "buy_price": 9870.0})
+        self.assertEqual(sb.call_count, 2)  # GET 1번 + PATCH 1번
+        self.assertIn("엑스", alert.call_args.args[0])
+
+    def test_settle_skips_failed_lookup(self):
+        trades = [{"rcept_no": "1", "corp_name": "가", "stock_code": "A", "buy_date": "20261118", "sell_date": "20261120",
+                   "buy_odno": "11", "sell_odno": "21"},
+                  {"rcept_no": "2", "corp_name": "나", "stock_code": "B", "buy_date": "20261118", "sell_date": "20261120",
+                   "buy_odno": "12", "sell_odno": "22"}]
+
+        def sb(method, path, body=None, *a, **k):
+            return trades if "sell_odno=not.is.null" in path else []
+
+        def fill(c, side, d):
+            if c == "B":
+                raise RuntimeError("KIS 500")
+            return (10, 10000.0) if side == "buy" else (10, 10500.0)
+
+        with mock.patch("trader.check_env"), mock.patch("bot.sb", side_effect=sb) as sbm, \
+             mock.patch("trader.fill", side_effect=fill), mock.patch("trader.fill_buy_prices"), \
+             mock.patch("trader.save_cash") as save, mock.patch("bot.send_telegram") as send:
+            trader.settle("20261120")
+        sbm.assert_any_call("PATCH", "trades?rcept_no=eq.1", {"buy_price": 10000.0, "sell_price": 10500.0, "sell_qty": 10})
+        text = send.call_args.args[0]
+        self.assertIn("실패 나: KIS 500", text)
+        self.assertIn("가 10주 +5.00%", text)
+        save.assert_called_once()
+
+    def test_fill_uses_summary(self):
+        res = {"output1": [], "output2": {"tot_ccld_qty": "312", "tot_ccld_amt": "1001520"}}
+        with mock.patch("trader.kis", return_value=res) as kis, mock.patch("trader.account", return_value={}):
+            self.assertEqual(trader.fill("223250", "buy", "20261120"), (312, 3210.0))
+        self.assertEqual(kis.call_args.args[3]["SLL_BUY_DVSN_CD"], "02")
+        with mock.patch("trader.kis", return_value={"output2": {"tot_ccld_qty": "0", "tot_ccld_amt": "0"}}), \
+             mock.patch("trader.account", return_value={}):
+            self.assertIsNone(trader.fill("223250", "sell", "20261120"))
+
+    def test_save_cash(self):
+        res = {"output1": [], "output2": [{"prvs_rcdl_excc_amt": "8007200", "tot_evlu_amt": "9992960"}]}
+        with mock.patch("trader.balance", return_value=res), mock.patch("bot.sb") as sb:
+            trader.save_cash()
+        body = sb.call_args.args[2]
+        self.assertEqual((body["id"], body["cash"], body["total"]), (1, 8007200, 9992960))
 
 
 if __name__ == "__main__":

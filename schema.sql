@@ -16,9 +16,14 @@ create table if not exists trades (
   buy_date text, buy_odno text, sell_date text, sell_odno text,
   buy_price double precision, sell_price double precision, sell_qty int
 );
+-- 화면용 계좌 잔고, 한 줄만 (trader.save_cash)
+create table if not exists account (
+  id int primary key, cash bigint, total bigint, updated_at text
+);
 
 -- anon 키로는 못 읽게. 봇은 secret 키라 상관없음
 alter table disclosures enable row level security;
 alter table runs enable row level security;
 alter table alerts enable row level security;
 alter table trades enable row level security;
+alter table account enable row level security;
