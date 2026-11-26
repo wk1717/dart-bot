@@ -1,3 +1,4 @@
+import html
 import time
 import urllib.parse
 from datetime import datetime
@@ -40,14 +41,65 @@ def load_trades():
 
 
 @st.cache_data(ttl=60)
-def load_account():
-    return bot.sb("GET", "account?select=*&id=eq.1")
+def load_cash():
+    """봇이 매수·정산 때 저장한 예수금. 현금은 사고팔 때만 바뀜"""
+    rows = bot.sb("GET", "account?select=cash&id=eq.1")
+    return rows[0]["cash"] if rows else None
 
 
 @st.cache_data(max_entries=20)
 def load_now(codes, slot):
     """slot이 바뀔 때만 새로 받음"""
     return prices.fetch_now(codes)
+
+
+UP, DOWN = "#f04452", "#3182f6"  # 이익 빨강, 손실 파랑
+
+
+def color_of(v):
+    return UP if v > 0 else DOWN if v < 0 else "gray"
+
+
+def pct(v, digits=2):
+    # 수익률 칸: 부호 따라 빨강/파랑
+    return f'<span style="color:{color_of(v)}">{v:+.{digits}f}%</span>'
+
+
+def list_html(df, right=()):
+    """토스증권 웹 목록처럼 표 테두리 없이. 값은 문자열(HTML 가능), right에 든 칸은 오른쪽 정렬, 첫 칸은 굵게"""
+    cell = "border:none;padding:14px 12px;"
+    th = (cell + "padding-top:8px;padding-bottom:8px;border-bottom:1px solid rgba(128,128,128,.2);"
+          "background:none;font-weight:400;opacity:.55;font-size:.8rem;")
+    align = lambda c: f'text-align:{"right" if c in right else "left"};'
+    head = f'<th style="{th}width:32px"></th>' + "".join(f'<th style="{th}{align(c)}">{c}</th>' for c in df.columns)
+    body = "".join(
+        f'<tr style="border:none"><td style="{cell}color:{DOWN}">{i}</td>'
+        + "".join(f'<td style="{cell}{align(c)}{"font-weight:600" if j == 0 else ""}">{v}</td>'
+                  for j, (c, v) in enumerate(row.items()))
+        + "</tr>"
+        for i, (_, row) in enumerate(df.iterrows(), 1))
+    return (f'<table style="width:100%;border:none;border-collapse:collapse;font-size:.9rem">'
+            f'<thead><tr style="border:none">{head}</tr></thead><tbody>{body}</tbody></table>')
+
+
+def show(df, right=()):
+    st.markdown(list_html(df, right), unsafe_allow_html=True)
+
+
+STAT_NUM = ["표본", "평균", "중앙값", "하락 비율", "p값"]
+
+
+def stats_view(view, *keep):
+    """유형별·그룹별 결과 표 문자열로"""
+    return pd.DataFrame({
+        **{k: view[k] for k in keep},
+        "표본": view["표본"].map("{:,}".format),
+        "평균": view["평균"].map(pct),
+        "중앙값": view["중앙값"].map(pct),
+        "하락 비율": view["하락 비율"].map("{:.0f}%".format),
+        "p값": view["p값"].map("{:.3f}".format),
+        "판단": view["판단"],
+    })
 
 
 def price_slot():
@@ -98,12 +150,7 @@ with tab1:
             color=alt.Color("지표:N", legend=alt.Legend(orient="top", title=None)),
             tooltip=["유형", "지표", alt.Tooltip("초과수익률(%):Q", format="+.2f")],
         ), width="stretch")
-        st.dataframe(view, hide_index=True, column_config={
-            "평균": st.column_config.NumberColumn(format="%+.2f%%"),
-            "중앙값": st.column_config.NumberColumn(format="%+.2f%%"),
-            "하락 비율": st.column_config.NumberColumn(format="%.0f%%"),
-            "p값": st.column_config.NumberColumn(format="%.3f"),
-        })
+        show(stats_view(view.sort_values("평균", ascending=False), "유형"), right=STAT_NUM)
         st.caption("기준가: 공시 다음 거래일 시가 · 초과수익률 = 종목 수익률 - 지수 수익률 · "
                    "정정공시, 거래정지, 거래량 0인 날 제외")
 
@@ -131,12 +178,7 @@ with tab4:
             color=alt.Color("지표:N", legend=alt.Legend(orient="top", title=None)),
             tooltip=["그룹", "지표", alt.Tooltip("초과수익률(%):Q", format="+.2f")],
         ), width="stretch")
-        st.dataframe(view, hide_index=True, column_config={
-            "평균": st.column_config.NumberColumn(format="%+.2f%%"),
-            "중앙값": st.column_config.NumberColumn(format="%+.2f%%"),
-            "하락 비율": st.column_config.NumberColumn(format="%.0f%%"),
-            "p값": st.column_config.NumberColumn(format="%.3f"),
-        })
+        show(stats_view(view, "그룹", "매입 비율"), right=STAT_NUM + ["매입 비율"])
         st.caption(f"모의투자 봇은 매입 비율 {trader.MIN_RATIO:.0%} 미만은 매수 제외, 비율 큰 것부터 매수 · "
                    "상장주식수는 현재 기준이라 오래된 공시는 그사이 증자·감자만큼 어긋남")
 
@@ -147,45 +189,62 @@ with tab5:
 
     @st.fragment(run_every="10s")
     def trade_board():
-        acc = load_account()
         trades = load_trades()
         held = trades[trades["sell_date"].isna()] if len(trades) else trades
         try:
             now = load_now(tuple(held["stock_code"]), price_slot()) if len(held) else {}
         except Exception:  # 네이버가 막히면 현재가만 비우고 표는 그대로
             now = {}
-        if acc:
-            c1, c2 = st.columns(2)
-            c1.metric("예수금 (D+2)", f"{acc[0]['cash']:,}원")
-            if all(c in now for c in held["stock_code"]):
-                value = sum(now[c] * q for c, q in zip(held["stock_code"], held["qty"]))
-                c2.metric("추정자산", f"{acc[0]['cash'] + value:,}원")
-            else:
-                c2.metric("추정자산", "-")
+        ready = len(held) and held["buy_price"].notna().all() and all(c in now for c in held["stock_code"])
+        if ready:
+            cost = int((held["buy_price"] * held["qty"]).sum())
+            value = sum(now[c] * q for c, q in zip(held["stock_code"], held["qty"]))
+            pnl = value - cost
+            try:
+                cash = load_cash()
+            except Exception:  # 못 읽으면 총액만 숨김
+                cash = None
+            total = f"총 {cash + value:,}원" if cash is not None else ""
+            st.markdown(f'<div style="opacity:.6">내 투자</div>'
+                        f'<div style="font-size:2rem;font-weight:700">{value:,}원'
+                        f'<span style="font-size:1rem;font-weight:400;opacity:.5;margin-left:10px">{total}</span></div>'
+                        f'<div style="color:{color_of(pnl)}">{pnl:+,}원 ({abs(pnl / cost):.1%})</div>'
+                        f'<div style="opacity:.5;font-size:.85rem;margin:4px 0 20px">매수금액 {cost:,}원</div>',
+                        unsafe_allow_html=True)
+            value_each = held["stock_code"].map(now) * held["qty"]
+            cost_each = held["buy_price"] * held["qty"]
+            ret = (value_each / cost_each - 1) * 100
+            order = ret.sort_values(ascending=False).index  # 수익률 높은 순
+            show(pd.DataFrame({
+                "종목": held["corp_name"],
+                "수량": held["qty"].map("{:,}주".format),
+                "매수 평균가": held["buy_price"].map("{:,.0f}원".format),
+                "현재가": held["stock_code"].map(now).map("{:,}원".format),
+                "평가금액": value_each.map("{:,.0f}원".format),
+                "수익률": [f'{pct(r)}<div style="color:{color_of(r)};opacity:.7;font-size:.8rem">{v - c:+,.0f}원</div>'
+                        for r, v, c in zip(ret, value_each, cost_each)],
+            }).loc[order], right=["수량", "매수 평균가", "현재가", "평가금액", "수익률"])
+        past = trades[trades["sell_date"].notna()] if len(trades) else trades
         if trades.empty:
             st.info("아직 거래 없음")
-        else:
-            cur = trades["stock_code"].map(now).where(trades["sell_date"].isna())
-            done = trades.dropna(subset=["sell_price"])
+        elif len(past):
+            done = past.dropna(subset=["sell_price"])
             ret = done["sell_price"] / done["buy_price"] - 1
-            if len(done):
-                st.write(f"청산 **{len(done)}건**, 평균 실현수익률 **{ret.mean():+.2%}** (수수료·세금 전)")
-            st.dataframe(pd.DataFrame({
-                "종목": trades["corp_name"],
-                "매수일": pd.to_datetime(trades["buy_date"]).dt.strftime("%m/%d"),
-                "상태": ["보유" if pd.isna(d) else ("청산" if pd.notna(p) else "매도 주문 (정산 대기)")
-                       for d, p in zip(trades["sell_date"], trades["sell_price"])],
-                "수량(주)": trades["sell_qty"].fillna(trades["qty"]).astype(int),
-                "매수 평균가": trades["buy_price"],
-                "현재가": cur,
-                "매도 평균가": trades["sell_price"],
-                "수익률": (trades["sell_price"].fillna(cur) / trades["buy_price"] - 1) * 100,
-            }), hide_index=True, column_config={
-                **{c: st.column_config.Column(alignment="left") for c in ["종목", "매수일", "상태", "수량(주)"]},
-                **{c: st.column_config.NumberColumn(format="%,.0f", alignment="left")
-                   for c in ["매수 평균가", "현재가", "매도 평균가"]},
-                "수익률": st.column_config.NumberColumn(format="%+.2f%%", alignment="left"),
-            })
+            summary = (f'<span style="opacity:.5;font-size:.85rem;margin-left:8px">실현 수익률 '
+                       f'{pct(ret.mean() * 100)} · {len(done)}건</span>' if len(done) else "")
+            table = list_html(pd.DataFrame({
+                "종목": past["corp_name"],
+                "매수일": pd.to_datetime(past["buy_date"]).dt.strftime("%m/%d"),
+                "상태": ["청산" if pd.notna(p) else "매도 주문 (정산 대기)" for p in past["sell_price"]],
+                "수량": past["sell_qty"].fillna(past["qty"]).astype(int).map("{:,}주".format),
+                "매수 평균가": past["buy_price"].map(lambda v: f"{v:,.0f}원" if pd.notna(v) else "-"),
+                "매도 평균가": past["sell_price"].map(lambda v: f"{v:,.0f}원" if pd.notna(v) else "-"),
+                "수익률": [pct(r) if pd.notna(r) else "-" for r in (past["sell_price"] / past["buy_price"] - 1) * 100],
+            }), right=["수량", "매수 평균가", "매도 평균가", "수익률"])
+            # 토스처럼 박스 없이 글자만 눌러서 펼침
+            st.markdown(f'<details style="margin-top:28px"><summary style="cursor:pointer;list-style:none;font-weight:600">'
+                        f'거래 내역 <span style="opacity:.4">›</span>{summary}</summary>{table}</details>',
+                        unsafe_allow_html=True)
 
     trade_board()
 
@@ -198,11 +257,18 @@ with tab2:
         recent["날짜"] = pd.to_datetime(recent["rcept_dt"])
         daily = recent.pivot_table(index="날짜", columns="category", aggfunc="size", fill_value=0)
         st.bar_chart(daily)
-        st.dataframe(recent["category"].value_counts().rename("건수"))
+        counts = recent["category"].value_counts()
+        show(pd.DataFrame({"유형": counts.index, "건수": counts.map("{:,}".format).values}), right=["건수"])
 
 with tab3:
     name = st.text_input("회사 이름")
     if name:
         found = search(name)
         st.write(f"{len(found)}건")
-        st.dataframe(found, hide_index=True)
+        if len(found):
+            show(pd.DataFrame({
+                "회사": found["corp_name"].map(html.escape),
+                "공시일": pd.to_datetime(found["rcept_dt"]).dt.strftime("%Y-%m-%d"),
+                "유형": found["category"].fillna("-"),
+                "공시": found["report_nm"].map(html.escape),
+            }))
