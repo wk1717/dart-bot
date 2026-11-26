@@ -11,6 +11,7 @@ from unittest import mock
 
 import analyze
 import backfill
+import backtest
 import bot
 import prices
 import trader
@@ -288,7 +289,7 @@ class TraderTest(unittest.TestCase):
         with mock.patch.object(trader, "MAX_HOLD", 1), mock.patch("trader.check_env"), \
              mock.patch("trader.trading_days", return_value=self.DAYS), mock.patch("bot.sb", sb), \
              mock.patch("trader.dart_buyback", side_effect=lambda c, b, e: {c: size[c]}), \
-             mock.patch("trader.quote", return_value=(10000, 100000)), \
+             mock.patch("trader.quote", return_value=(10000, 100000)), mock.patch("trader.holdings", return_value={}), \
              mock.patch("trader.order", return_value="1") as order, mock.patch("bot.send_telegram") as send, \
              mock.patch("trader.save_cash"):
             trader.buy("20261118")
@@ -298,9 +299,8 @@ class TraderTest(unittest.TestCase):
         self.assertIn("매수 big(big) 100주, 매입 비율 5.00%", text)
 
     def test_settle_returns(self):
-        trades = [{"rcept_no": "1", "corp_name": "가", "buy_odno": "0000011", "sell_odno": "0000021"},
-                  {"rcept_no": "2", "corp_name": "나", "buy_odno": "12", "sell_odno": "22"}]
-        filled = {"11": (10, 10000.0), "21": (10, 10500.0)}  # 나는 아직 체결 안 됨
+        trades = [{"rcept_no": "1", "corp_name": "가"}, {"rcept_no": "2", "corp_name": "나"}]
+        filled = {"1": ((10, 10000.0), (10, 10500.0)), "2": ((10, 10000.0), None)}  # 나는 매도 아직 체결 안 됨
         closed = [{"buy_price": 100.0, "sell_price": 90.0, "sell_qty": 10}]  # 예전 거래 -10%, -100원
         updates, lines = trader.settle_lines(trades, filled, closed)
         self.assertEqual(updates, [("1", {"buy_price": 10000.0, "sell_price": 10500.0, "sell_qty": 10})])
@@ -342,7 +342,7 @@ class TraderTest(unittest.TestCase):
 
         with mock.patch("trader.check_env"), mock.patch("bot.sb", side_effect=sb) as sbm, \
              mock.patch("trader.fill", side_effect=fill), mock.patch("trader.fill_buy_prices"), \
-             mock.patch("trader.save_cash") as save, mock.patch("bot.send_telegram") as send:
+             mock.patch("trader.save_cash") as save, mock.patch("trader.reconcile"), mock.patch("bot.send_telegram") as send:
             trader.settle("20261120")
         sbm.assert_any_call("PATCH", "trades?rcept_no=eq.1", {"buy_price": 10000.0, "sell_price": 10500.0, "sell_qty": 10})
         text = send.call_args.args[0]
@@ -378,3 +378,90 @@ class FetchNowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BacktestTest(unittest.TestCase):
+    def test_simulate_follows_bot_rules(self):
+        days = ["d1", "d2", "d3", "d4"]
+        prices = {"A": {d: (1000, 1100, 1000) for d in days},
+                  "B": {"d1": (500, 500, 500), "d2": (500, 500, 500), "d4": (500, 600, 500)}}  # B는 d3 거래정지
+        signals = {"d1": [(0.02, "A", "a"), (0.005, "C", "c"), (0.03, "B", "b")]}  # C는 1% 미만
+        equity, trades = backtest.simulate(signals, days, prices, fee=0, tax=0)
+        self.assertEqual([(t["code"], t["sell_date"]) for t in trades], [("A", "d3"), ("B", "d4")])
+        self.assertEqual(trades[0]["qty"], 1000)  # 100만원 / 전날 종가 1000
+        self.assertAlmostEqual(trades[0]["ret"], 0.1)
+        self.assertEqual(equity[-1][1], backtest.START_CASH + 1000 * 100 + 2000 * 100)
+
+
+class TraderLedgerTest(unittest.TestCase):
+    """주문 전에 장부부터 쓰고, 끝나면 장부와 계좌를 맞춰봄"""
+    ROW = {"rcept_no": "r1", "rcept_dt": "20261117", "corp_code": "c", "stock_code": "A", "corp_name": "에이",
+           "report_nm": "주요사항보고서(자기주식취득결정)"}
+
+    def run_buy(self, order, in_account=()):
+        calls = []
+
+        def sb(method, path, body=None, *a, **k):
+            calls.append((method, path.split("?")[0]))
+            return [self.ROW] if path.startswith("disclosures") else []
+
+        with mock.patch("trader.check_env"), mock.patch("trader.trading_days", return_value=TraderTest.DAYS), \
+             mock.patch("bot.sb", sb), mock.patch("trader.dart_buyback", return_value={"r1": "5000"}), \
+             mock.patch("trader.quote", return_value=(10000, 100000)), \
+             mock.patch("trader.holdings", return_value={c: 1 for c in in_account}), \
+             mock.patch("trader.order", side_effect=order) as o, mock.patch("bot.send_telegram") as send, \
+             mock.patch("trader.fill_buy_prices"), mock.patch("trader.save_cash"):
+            trader.buy("20261118")
+        return calls, o, send.call_args.args[0]
+
+    def test_ledger_written_before_order(self):
+        calls, _, _ = self.run_buy(lambda *a: "77")
+        self.assertEqual([c for c in calls if c[1] == "trades"][1:], [("POST", "trades"), ("PATCH", "trades")])
+
+    def test_rejected_order_removed_from_ledger(self):
+        def order(*a):
+            raise trader.Rejected("KIS VTTC0012U 40580000: 장운영일자가 아닙니다")
+        calls, _, text = self.run_buy(order)
+        self.assertIn(("DELETE", "trades"), calls)  # 지워야 다음 거래일에 다시 삼
+        self.assertIn("실패 에이", text)
+
+    def test_unknown_order_stays_in_ledger(self):
+        def order(*a):
+            raise TimeoutError("timed out")
+        calls, _, text = self.run_buy(order)
+        self.assertNotIn(("DELETE", "trades"), calls)  # 남겨야 09:05에 또 안 삼
+        self.assertIn("확인 필요 에이: 주문 결과 모름", text)
+
+    def test_skip_when_already_in_account(self):
+        calls, order, text = self.run_buy(lambda *a: "77", in_account=["A"])
+        order.assert_not_called()
+        self.assertIn("건너뜀 에이: 장부에 없는데 계좌에 있음", text)
+
+    def test_reconcile(self):
+        book = [{"stock_code": "A", "corp_name": "에이", "qty": 10}, {"stock_code": "B", "corp_name": "비", "qty": 5}]
+        with mock.patch("trader.check_env"), mock.patch("bot.sb", return_value=book), mock.patch("bot.send_telegram") as send, \
+             mock.patch("trader.holdings", return_value={"A": 10, "B": 3, "C": 7}):
+            trader.reconcile()
+        text = send.call_args.args[0]
+        self.assertNotIn("에이", text)
+        self.assertIn("비(B) 장부 5주 · 계좌 3주", text)
+        self.assertIn("C(C) 장부 0주 · 계좌 7주", text)
+        with mock.patch("trader.check_env"), mock.patch("bot.sb", return_value=book[:1]), mock.patch("bot.send_telegram") as send, \
+             mock.patch("trader.holdings", return_value={"A": 10}):
+            trader.reconcile()
+        send.assert_not_called()  # 맞으면 조용히
+
+    def test_no_order_when_ledger_write_fails(self):
+        def sb(method, path, body=None, *a, **k):
+            if method == "POST":
+                raise RuntimeError("Supabase 503 trades")
+            return [self.ROW] if path.startswith("disclosures") else []
+
+        with mock.patch("trader.check_env"), mock.patch("trader.trading_days", return_value=TraderTest.DAYS), \
+             mock.patch("bot.sb", sb), mock.patch("trader.dart_buyback", return_value={"r1": "5000"}), \
+             mock.patch("trader.quote", return_value=(10000, 100000)), mock.patch("trader.holdings", return_value={}), \
+             mock.patch("trader.order") as order, mock.patch("bot.send_telegram") as send, \
+             mock.patch("trader.fill_buy_prices"), mock.patch("trader.save_cash"):
+            trader.buy("20261118")
+        order.assert_not_called()
+        self.assertIn("실패 에이: 장부 쓰기", send.call_args.args[0])
