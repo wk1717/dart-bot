@@ -1,5 +1,7 @@
 # dart-bot
 
+[![test](https://github.com/wk1717/dart-bot/actions/workflows/test.yml/badge.svg)](https://github.com/wk1717/dart-bot/actions/workflows/test.yml)
+
 DART 유가·코스닥 상장사 공시를 GitHub Actions 크론으로 수집해 Supabase에 쌓음
 텔레그램으로는 하루 요약과 에러만 보낸다(같은 에러는 1시간에 한 번). 외부 패키지 없이 Python 표준 라이브러리만 사용
 
@@ -21,3 +23,7 @@ python3 bot.py summary [YYYYMMDD] # 요약 전송
 Actions 탭에서 `dart-bot` 워크플로를 수동 실행(collect/summary)가능
 ## 테스트
 `python3 -m unittest discover -s tests -t .`
+PR·main 푸시마다 GitHub Actions에서 자동으로 돎
+
+## 트러블슈팅
+[docs/troubleshooting](docs/troubleshooting)에 이슈당 한 파일
