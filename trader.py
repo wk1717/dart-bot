@@ -5,6 +5,7 @@ python3 trader.py buy    08:40 실행. 전 거래일 자사주취득 공시 종�
                          끝에 체결된 매수가를 buy_price에, 계좌 잔고를 account에 저장 (화면용)
 python3 trader.py sell   15:20 실행. 산 날 포함 3거래일째인 종목을 시장가 매도 → 종가 체결
 python3 trader.py settle 15:40 실행. 매도 체결가로 수익률 계산해서 알림 (15:20엔 아직 체결 전)
+                         끝에 장부(trades)와 KIS 잔고를 맞춰보고 어긋나면 알림 (reconcile만 따로도 됨)
 
 규칙은 analyze.py, buyback.py 결과 기준
 - 자사주취득 3일 평균 +1.76%
@@ -41,6 +42,10 @@ def check_env():
 
 # --- KIS API ---
 
+class Rejected(RuntimeError):
+    """KIS가 받아서 거절함 (rt_cd != 0). 이건 주문이 안 나간 게 확실함. 타임아웃·5xx는 나갔는지 모름"""
+
+
 def _http(method, path, headers, body=None):
     req = urllib.request.Request(BASE + path, json.dumps(body).encode() if body else None,
                                  {"content-type": "application/json", **headers}, method=method)
@@ -72,7 +77,7 @@ def kis(method, path, tr_id, params=None, body=None):
     res = _http(method, path, {"authorization": f"Bearer {token()}", "appkey": os.environ["KIS_APP_KEY"],
                                "appsecret": os.environ["KIS_APP_SECRET"], "tr_id": tr_id, "custtype": "P"}, body)
     if res.get("rt_cd") != "0":
-        raise RuntimeError(f"KIS {tr_id} {res.get('msg_cd')}: {res.get('msg1', '').strip()}")
+        raise Rejected(f"KIS {tr_id} {res.get('msg_cd')}: {res.get('msg1', '').strip()}")
     return res
 
 
@@ -170,10 +175,10 @@ def due_to_sell(buy_date, days):
 
 
 def settle_lines(trades, filled, closed):
-    """(DB에 쓸 값, 알림 줄). closed = 이미 정산된 거래 (누적 계산용)"""
+    """(DB에 쓸 값, 알림 줄). filled = {접수번호: (매수 체결, 매도 체결)}, closed = 이미 정산된 거래 (누적 계산용)"""
     updates, lines, done = [], [], list(closed)
     for t in trades:
-        b, s = filled.get(t["buy_odno"].lstrip("0")), filled.get(t["sell_odno"].lstrip("0"))
+        b, s = filled.get(t["rcept_no"], (None, None))
         if not b or not s:
             lines.append(f"확인 안 됨 {t['corp_name']}: 체결 내역 없음")
             continue
@@ -209,6 +214,7 @@ def buy(today=None):
     trades = bot.sb("GET", "trades?select=rcept_no,stock_code,sell_date")
     open_ = [t for t in trades if not t["sell_date"]]
     signals = pick_signals(rows, days, {t["rcept_no"] for t in trades}, {t["stock_code"] for t in open_})
+    in_account = holdings()  # 장부엔 없는데 계좌에 있는 종목은 안 삼 (장부 쓰기가 실패했던 경우 등)
     lines, ranked = [], []
     for r in signals:
         try:
@@ -229,13 +235,27 @@ def buy(today=None):
         if qty == 0:
             lines.append(f"건너뜀 {r['corp_name']}: 1주가 {BUDGET:,}원 넘음")
             continue
+        if r["stock_code"] in in_account:
+            lines.append(f"건너뜀 {r['corp_name']}: 장부에 없는데 계좌에 있음")
+            continue
+        # 장부에 먼저 쓰고 주문 → 주문 뒤 장부 쓰기가 실패해도 09:05 재실행이 같은 주문을 또 내지 않음
+        key = f"trades?rcept_no=eq.{r['rcept_no']}"
+        try:
+            bot.sb("POST", "trades", {"rcept_no": r["rcept_no"], "stock_code": r["stock_code"],
+                                      "corp_name": r["corp_name"], "qty": qty, "buy_date": today})
+        except Exception as e:  # 장부에 못 쓰면 주문도 안 냄
+            lines.append(f"실패 {r['corp_name']}: 장부 쓰기 {e}")
+            continue
         try:
             odno = order("buy", r["stock_code"], qty)
-        except Exception as e:  # 주문 실패는 기록 안 함 → 휴장일이면 다음 거래일에 다시 시도
+        except Rejected as e:  # 확실히 안 나감 → 지움. 휴장일이면 다음 거래일에 다시 시도
+            bot.sb("DELETE", key)
             lines.append(f"실패 {r['corp_name']}: {e}")
             continue
-        bot.sb("POST", "trades", {"rcept_no": r["rcept_no"], "stock_code": r["stock_code"],
-                                  "corp_name": r["corp_name"], "qty": qty, "buy_date": today, "buy_odno": odno})
+        except Exception as e:  # 나갔는지 모름 → 장부에 남겨서 다시 안 삼. 정산 때 대사에서 걸림
+            lines.append(f"확인 필요 {r['corp_name']}: 주문 결과 모름 ({e})")
+            continue
+        bot.sb("PATCH", key, {"buy_odno": odno})
         lines.append(f"매수 {r['corp_name']}({r['stock_code']}) {qty}주, 매입 비율 {ratio:.2%}")
     report("매수", lines)
     fill_buy_prices()
@@ -266,15 +286,15 @@ def settle(today=None):
     check_env()
     today = today or date.today().strftime("%Y%m%d")
     fill_buy_prices()  # 09:05 뒤 재시도·추가 체결분
-    trades = bot.sb("GET", "trades?select=rcept_no,corp_name,stock_code,buy_date,sell_date,buy_odno,sell_odno"
+    trades = bot.sb("GET", "trades?select=rcept_no,corp_name,stock_code,buy_date,sell_date"
                            "&sell_odno=not.is.null&sell_price=is.null")
     if trades:
         closed = bot.sb("GET", "trades?select=buy_price,sell_price,sell_qty&sell_price=not.is.null")
         filled, ok, failed = {}, [], []
         for t in trades:  # 한 종목 조회가 실패해도 나머지는 정산. 실패한 건 내일 다시
             try:
-                filled[t["buy_odno"].lstrip("0")] = fill(t["stock_code"], "buy", t["buy_date"])
-                filled[t["sell_odno"].lstrip("0")] = fill(t["stock_code"], "sell", t["sell_date"])
+                filled[t["rcept_no"]] = (fill(t["stock_code"], "buy", t["buy_date"]),
+                                         fill(t["stock_code"], "sell", t["sell_date"]))
                 ok.append(t)
             except Exception as e:
                 failed.append(f"실패 {t['corp_name']}: {e}")
@@ -285,10 +305,28 @@ def settle(today=None):
     else:
         print("정산할 거래 없음")
     save_cash()  # 정산 끝난 뒤에. 잔고 저장이 실패해도 정산은 됨
+    reconcile()
+
+
+def reconcile():
+    """장부(trades 보유 중)와 KIS 잔고의 종목·수량 비교. 어긋나면 알림. 매도 체결(15:30) 뒤에 돌려야 맞음"""
+    check_env()
+    book = {t["stock_code"]: (t["corp_name"], t["qty"] or 0)
+            for t in bot.sb("GET", "trades?select=stock_code,corp_name,qty&sell_date=is.null")}
+    real = holdings()
+    lines = []
+    for code in sorted(set(book) | set(real)):
+        name, want = book.get(code, (code, 0))
+        if want != real.get(code, 0):
+            lines.append(f"{name}({code}) 장부 {want:,}주 · 계좌 {real.get(code, 0):,}주")
+    if lines:
+        report("대사 불일치", lines)
+    else:
+        print(f"대사 일치: {len(book)}종목")
 
 
 def report(kind, lines):
-    text = f"{ {'매수': '📈', '매도': '📉'}.get(kind, '💰')} {datetime.now():%m/%d} 모의투자 {kind}\n" + ("\n".join(lines) or "대상 없음")
+    text = f"{ {'매수': '📈', '매도': '📉', '대사 불일치': '⚠️'}.get(kind, '💰')} {datetime.now():%m/%d} 모의투자 {kind}\n" + ("\n".join(lines) or "대상 없음")
     print(text)
     if lines:
         bot.send_telegram(text)
@@ -296,7 +334,7 @@ def report(kind, lines):
 
 if __name__ == "__main__":
     cmd = sys.argv[1:2]
-    run = {"buy": buy, "sell": sell, "settle": settle}.get(cmd[0] if cmd else "")
+    run = {"buy": buy, "sell": sell, "settle": settle, "reconcile": reconcile}.get(cmd[0] if cmd else "")
     if not run:
         sys.exit(__doc__)
     try:
