@@ -1,3 +1,4 @@
+import ast
 import html
 import time
 import urllib.parse
@@ -140,6 +141,10 @@ with tab1:
         view["판단"] = ["표본 부족" if n < analyze.MIN_SAMPLE else ("유의" if p < 0.05 else "우연일 수 있음")
                       for n, p in zip(view["표본"], view["p값"])]
         view = view.sort_values("평균")
+        used = int(view["표본"].sum())
+        dropped = sum(sum(ast.literal_eval(d).values()) for d in stats["dropped"])
+        st.markdown(f'<div style="opacity:.6;font-size:.9rem">공시 {used:,}건 · {h}거래일 초과수익률</div>',
+                    unsafe_allow_html=True)
 
         # 가로 막대: 유형 이름이 세로로 눕지 않게, 평균 순서대로
         long = view.melt(id_vars="유형", value_vars=["평균", "중앙값"], var_name="지표", value_name="초과수익률(%)")
@@ -150,16 +155,24 @@ with tab1:
             color=alt.Color("지표:N", legend=alt.Legend(orient="top", title=None)),
             tooltip=["유형", "지표", alt.Tooltip("초과수익률(%):Q", format="+.2f")],
         ), width="stretch")
-        show(stats_view(view.sort_values("평균", ascending=False), "유형"), right=STAT_NUM)
-        st.caption("기준가: 공시 다음 거래일 시가 · 초과수익률 = 종목 수익률 - 지수 수익률 · "
-                   "정정공시, 거래정지, 거래량 0인 날 제외")
+        table = stats_view(view.sort_values("평균", ascending=False), "유형")
+        table["표본"] = [f'{n:,}<span style="opacity:.5;margin-left:6px">{n / used:.0%}</span>'
+                       for n in view.sort_values("평균", ascending=False)["표본"]]
+        show(table, right=STAT_NUM)
+        st.caption(f"공시 다음 날 시가에 샀을 때 같은 기간 지수보다 더 오른 만큼 · 거래정지 등 {dropped:,}건 제외")
 
 with tab4:
     bb = load_stats("buyback_stats.csv")
     if bb is None:
         st.info("data/buyback_stats.csv가 없음 → python3 buyback.py 먼저 실행")
     else:
-        st.caption("자사주취득 공시를 매입 비율(취득예정 주식 수 / 상장주식수) 순으로 3등분 · 3거래일 초과수익률")
+        stats = load_stats()
+        known, unknown = int(bb["n"].sum()), ""
+        if stats is not None and (stats["category"] == "자사주취득").any():
+            n_all = int(stats.loc[stats["category"] == "자사주취득", "n_3d"].iloc[0])
+            unknown = f" · 매입 규모 모르는 {n_all - known:,}건 제외"
+        st.markdown(f'<div style="opacity:.6;font-size:.9rem">자사주취득 공시 {known:,}건 · 3거래일 초과수익률</div>',
+                    unsafe_allow_html=True)
         view = pd.DataFrame({
             "그룹": bb["group"],
             "매입 비율": [f"{a:.2%} ~ {b:.2%}" for a, b in zip(bb["ratio_min"], bb["ratio_max"])],
@@ -170,17 +183,19 @@ with tab4:
             "p값": bb["p"],
         })
         view["판단"] = ["유의" if p < 0.05 else "우연일 수 있음" for p in view["p값"]]
-        long = view.melt(id_vars="그룹", value_vars=["평균", "중앙값"], var_name="지표", value_name="초과수익률(%)")
+        # 축에 매입 비율 구간까지: "상위 2.34%~"
+        axis = {g: f"{g} {a:.1%}~" if g == "상위" else f"{g} ~{b:.1%}" if g == "하위" else f"{g} {a:.1%}~{b:.1%}"
+                for g, a, b in zip(bb["group"], bb["ratio_min"], bb["ratio_max"])}
+        long = view.assign(그룹=view["그룹"].map(axis)).melt(id_vars="그룹", value_vars=["평균", "중앙값"], var_name="지표", value_name="초과수익률(%)")
         st.altair_chart(alt.Chart(long).mark_bar().encode(
-            x=alt.X("그룹:N", sort=["하위", "중간", "상위"], title=None, axis=alt.Axis(labelAngle=0)),
+            x=alt.X("그룹:N", sort=list(axis.values()), title=None, axis=alt.Axis(labelAngle=0)),
             xOffset="지표:N",
             y=alt.Y("초과수익률(%):Q"),
             color=alt.Color("지표:N", legend=alt.Legend(orient="top", title=None)),
             tooltip=["그룹", "지표", alt.Tooltip("초과수익률(%):Q", format="+.2f")],
         ), width="stretch")
         show(stats_view(view, "그룹", "매입 비율"), right=STAT_NUM + ["매입 비율"])
-        st.caption(f"모의투자 봇은 매입 비율 {trader.MIN_RATIO:.0%} 미만은 매수 제외, 비율 큰 것부터 매수 · "
-                   "상장주식수는 현재 기준이라 오래된 공시는 그사이 증자·감자만큼 어긋남")
+        st.caption(f"매입 비율 = 사기로 한 주식 수 ÷ 지금 상장주식수{unknown}")
 
 with tab5:
     st.markdown(f"**대상** 전 거래일 {trader.CATEGORY} 공시 · 매입 비율 {trader.MIN_RATIO:.0%} 이상, 큰 순  \n"
