@@ -210,34 +210,36 @@ with tab5:
             now = load_now(tuple(held["stock_code"]), price_slot()) if len(held) else {}
         except Exception:  # 네이버가 막히면 현재가만 비우고 표는 그대로
             now = {}
-        ready = len(held) and held["buy_price"].notna().all() and all(c in now for c in held["stock_code"])
-        if ready:
-            cost = int((held["buy_price"] * held["qty"]).sum())
-            value = sum(now[c] * q for c, q in zip(held["stock_code"], held["qty"]))
-            pnl = value - cost
+        if len(held) and all(c in now for c in held["stock_code"]):
+            filled = held["buy_price"].notna()  # 08:40 주문 ~ 09:05 사이엔 오늘 산 종목 매수가가 아직 없음
+            value_each = held["stock_code"].map(now) * held["qty"]
+            cost_each = held["buy_price"] * held["qty"]
+            # 요약은 체결된 것만 (매수금액·손익과 맞추려고). 체결 대기는 표에만
+            value, cost = int(value_each[filled].sum()), int(cost_each[filled].sum())
+            pnl = int((value_each - cost_each)[filled].sum())
             try:
                 cash = load_cash()
             except Exception:  # 못 읽으면 총액만 숨김
                 cash = None
-            total = f"총 {cash + value:,}원" if cash is not None else ""
+            total = f"총 {cash + value:,}원" if cash is not None else ""  # 체결 전 주문은 예수금에서 아직 안 빠짐
+            change = f'<div style="color:{color_of(pnl)}">{pnl:+,}원 ({abs(pnl / cost):.1%})</div>' if cost else ""
             st.markdown(f'<div style="opacity:.6">내 투자</div>'
                         f'<div style="font-size:2rem;font-weight:700">{value:,}원'
                         f'<span style="font-size:1rem;font-weight:400;opacity:.5;margin-left:10px">{total}</span></div>'
-                        f'<div style="color:{color_of(pnl)}">{pnl:+,}원 ({abs(pnl / cost):.1%})</div>'
-                        f'<div style="opacity:.5;font-size:.85rem;margin:4px 0 20px">매수금액 {cost:,}원</div>',
+                        f'{change}<div style="opacity:.5;font-size:.85rem;margin:4px 0 20px">매수금액 {cost:,}원</div>',
                         unsafe_allow_html=True)
-            value_each = held["stock_code"].map(now) * held["qty"]
-            cost_each = held["buy_price"] * held["qty"]
             ret = (value_each / cost_each - 1) * 100
-            order = ret.sort_values(ascending=False).index  # 수익률 높은 순
+            order = ret.sort_values(ascending=False).index  # 수익률 높은 순, 체결 대기는 맨 뒤
+            gray = '<span style="opacity:.5">체결 대기</span>'
             show(pd.DataFrame({
                 "종목": held["corp_name"],
                 "수량": held["qty"].map("{:,}주".format),
-                "매수 평균가": held["buy_price"].map("{:,.0f}원".format),
+                "매수 평균가": [f"{p:,.0f}원" if f else gray for p, f in zip(held["buy_price"], filled)],
                 "현재가": held["stock_code"].map(now).map("{:,}원".format),
                 "평가금액": value_each.map("{:,.0f}원".format),
                 "수익률": [f'{pct(r)}<div style="color:{color_of(r)};opacity:.7;font-size:.8rem">{v - c:+,.0f}원</div>'
-                        for r, v, c in zip(ret, value_each, cost_each)],
+                        if f else '<div style="transform:translateY(50%)">-</div><div style="font-size:.8rem">&nbsp;</div>'  # 두 줄짜리 행과 높이 맞추고 가운데로
+                        for r, v, c, f in zip(ret, value_each, cost_each, filled)],
             }).loc[order], right=["수량", "매수 평균가", "현재가", "평가금액", "수익률"])
         past = trades[trades["sell_date"].notna()] if len(trades) else trades
         if trades.empty:
