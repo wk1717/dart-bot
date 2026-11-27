@@ -432,6 +432,18 @@ class TraderLedgerTest(unittest.TestCase):
         self.assertNotIn(("DELETE", "trades"), calls)  # 남겨야 09:05에 또 안 삼
         self.assertIn("확인 필요 에이: 주문 결과 모름", text)
 
+    def test_rate_limit_retries_get_only(self):
+        busy = RuntimeError('KIS 500 /x: {"rt_cd":"1","msg_cd":"EGW00215"}')
+        env = {"KIS_APP_KEY": "k", "KIS_APP_SECRET": "s"}
+        with mock.patch.dict(os.environ, env), mock.patch("trader.token", return_value="t"), \
+             mock.patch("time.sleep"), mock.patch("trader._http", side_effect=[busy, {"rt_cd": "0"}]) as h:
+            trader.kis("GET", "/x", "T")
+        self.assertEqual(h.call_count, 2)
+        with mock.patch.dict(os.environ, env), mock.patch("trader.token", return_value="t"), \
+             mock.patch("time.sleep"), mock.patch("trader._http", side_effect=[busy]) as h:
+            self.assertRaises(RuntimeError, trader.kis, "POST", "/x", "T")  # 주문은 다시 안 냄
+        self.assertEqual(h.call_count, 1)
+
     def test_skip_when_already_in_account(self):
         calls, order, text = self.run_buy(lambda *a: "77", in_account=["A"])
         order.assert_not_called()

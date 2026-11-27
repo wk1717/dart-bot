@@ -74,8 +74,16 @@ def kis(method, path, tr_id, params=None, body=None):
     time.sleep(1)  # 모의투자는 초당 호출 제한이 빡빡함 (0.5초는 EGW00201 걸림)
     if params:
         path += "?" + urllib.parse.urlencode(params)
-    res = _http(method, path, {"authorization": f"Bearer {token()}", "appkey": os.environ["KIS_APP_KEY"],
-                               "appsecret": os.environ["KIS_APP_SECRET"], "tr_id": tr_id, "custtype": "P"}, body)
+    headers = {"authorization": f"Bearer {token()}", "appkey": os.environ["KIS_APP_KEY"],
+               "appsecret": os.environ["KIS_APP_SECRET"], "tr_id": tr_id, "custtype": "P"}
+    try:
+        res = _http(method, path, headers, body)
+    except RuntimeError as e:
+        # 장 시작 직후엔 처음 부르는 조회도 초당 건수 초과로 막힐 때가 있음 → 조회만 한 번 더. 주문은 두 번 나가면 안 돼서 안 함
+        if method != "GET" or not any(c in str(e) for c in ("EGW00215", "EGW00201")):
+            raise
+        time.sleep(2)
+        res = _http(method, path, headers, body)
     if res.get("rt_cd") != "0":
         raise Rejected(f"KIS {tr_id} {res.get('msg_cd')}: {res.get('msg1', '').strip()}")
     return res
